@@ -1,0 +1,35 @@
+chain = "base"
+
+[[exchange]]
+name = "uniswap-v3"
+kind = "uniswap_v3"
+factory = "0x33128a8fc17869897dce68ed026d694621f6fdfd"
+pool_codehashes = ["0xee8f1c7d6c754818974392c624a6b4f5cab0c815195f8c859735dcb7a1259f1b"]
+
+[[exchange]]
+name = "uniswap-v2"
+kind = "uniswap_v2"
+factory = "0x8909dc15e40173ff4699343b6eb8132c65e18ec6"
+pool_codehashes = ["0x5b83bdbcc56b2e630f2807bbadd2b0c21619108066b92a58de081261089e9ce5"]
+
+[[exchange]]
+name = "aerodrome"
+kind = "solidly"
+factory = "0x420dd381b31aef6683db6b902084cb0ffece40da"
+pool_codehashes = ["0x7dd6ffe6daf4e82054c91becd71b8c9ba0a135f0f403da1ef7b0f81bb8ba4408"]
+
+[[exchange]]
+name = "aerodrome-slipstream"
+kind = "uniswap_v3"
+factory = "0x5e7bb104d84c7cb9b682aac2f3d509f5f406809a"
+
+[[exchange]]
+name = "pancakeswap-v3"
+kind = "uniswap_v3"
+factory = "0x0bfbcf9fa4f9c56b0f40a671ad40e0805a091865"
+pool_codehashes = ["0xc85259458226f7f2d9e68ffffb0e483de3821c0689f9f7f1d50757ba63ad99bb"]
+
+[[exchange]]
+name = "balancer-v2"
+kind = "balancer_v2"
+factory = "0xba12222222228d8ba445958a75a0704d566bf2c8"

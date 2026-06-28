@@ -1,0 +1,18 @@
+# Base mainnet — SECONDARY pool book (committed to git).
+#
+# Discovered forks / clones found by `arb scan` via bytecode-codehash
+# clustering: contracts that emit a known AMM event (UniV2 Sync, UniV3 Swap,
+# …) and share a codehash with — or cluster apart from — the official
+# exchanges. These are CANDIDATES: review, then promote into
+# `base.official.toml` once trusted. Nothing here is traded by default.
+
+chain = "base"
+
+# [[pool]] entries are appended/updated by `arb scan`. Example shape:
+# [[pool]]
+# address = "0x..."
+# exchange = "uniswap_v2-fork"   # classified by matching codehash / topic0
+# kind = "uniswap_v2"
+# token0 = "0x..."
+# token1 = "0x..."
+# discovered_block = 0

@@ -1,0 +1,6 @@
+/target
+/result
+/result-*
+.direnv/
+# local env config, may contain secrets (the .example is committed)
+.env

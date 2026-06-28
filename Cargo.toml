@@ -1,0 +1,30 @@
+[package]
+name = "arb"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+alloy-primitives = { version = "1", features = ["serde"] }
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
+futures = "0.3"
+async-trait = "0.1"
+dashmap = "6"
+arc-swap = "1"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+
+# Real WebSocket streaming (Base/BSC) lives behind this feature so the default
+# build + tests stay light and network-free. Enable with `--features live-rpc`.
+alloy = { version = "1.7", default-features = false, features = [
+    "provider-ws",
+    "pubsub",
+    "rpc-types-eth",
+    "sol-types",
+    "contract",
+], optional = true }
+
+[features]
+live-rpc = ["dep:alloy"]

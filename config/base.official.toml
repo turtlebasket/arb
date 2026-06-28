@@ -1,0 +1,670 @@
+chain = "base"
+
+[tokens.DAI]
+address = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+decimals = 18
+
+[tokens.USDC]
+address = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+decimals = 6
+
+[tokens.USDbC]
+address = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+decimals = 6
+
+[tokens.WETH]
+address = "0x4200000000000000000000000000000000000006"
+decimals = 18
+
+[tokens.cbBTC]
+address = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+decimals = 8
+
+[[pool]]
+address = "0x002f9eaf6a8655185d0dbe083c961d660026be48"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 10000
+
+[[pool]]
+address = "0x06959273e9a65433de71f5a452d529544e07ddd0"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 100
+
+[[pool]]
+address = "0x0b1c2dcbbfa744ebd3fc17ff1a96a1e1eb4b2d69"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+fee_bps = 10000
+
+[[pool]]
+address = "0x0d00ae15444e5aa81a7b3340946488d1febe5ca9"
+exchange = "uniswap-v2"
+kind = "uniswap_v2"
+token0 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 30
+
+[[pool]]
+address = "0x118efef7db0712f03e067122b8f89e7a4b79262f"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+fee_bps = 10000
+
+[[pool]]
+address = "0x16de087bb1a220c7fc388f3f0dfd38eb1fcdf8b0"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 10000
+
+[[pool]]
+address = "0x19a8b1542b807cd6a76fcbb5ff5f53c6169f36d7"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+fee_bps = 500
+
+[[pool]]
+address = "0x22f9623817f152148b4e080e98af66fbe9c5adf8"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 100
+
+[[pool]]
+address = "0x233571eae953d9d59eefc0769f71dc19287ddccb"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+fee_bps = 10000
+
+[[pool]]
+address = "0x2578365b3dfa7ffe60108e181efb79feddec2319"
+exchange = "aerodrome"
+kind = "uniswap_v2"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+
+[[pool]]
+address = "0x26e263efdc91f0d3279e2ec2bd58a7ca5c2fce62"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+fee_bps = 500
+
+[[pool]]
+address = "0x27a8afa3bd49406e48a074350fb7b2020c43b2bd"
+exchange = "aerodrome"
+kind = "solidly"
+token0 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+
+[[pool]]
+address = "0x29ed55b18af0add137952cb3e29fb77b32fce426"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 100
+
+[[pool]]
+address = "0x2a88ad25af542f6485b54709991d758c4f411d8f"
+exchange = "aerodrome"
+kind = "uniswap_v2"
+token0 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+
+[[pool]]
+address = "0x345825a980bd94e1480bc4f20fe4e3dae2f23dd3"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+fee_bps = 100
+
+[[pool]]
+address = "0x3548029694fbb241d45fb24ba0cd9c9d4e745f16"
+exchange = "aerodrome"
+kind = "solidly"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+
+[[pool]]
+address = "0x3b8000cd10625abdc7370fb47ed4d4a9c6311fd5"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 100
+
+[[pool]]
+address = "0x3ddf264ac95d19e81f8c25f4c300c4e59e424d43"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 3000
+
+[[pool]]
+address = "0x3e7586d52a9d07f8611b8ecf6ccc8a689c34a659"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+fee_bps = 10000
+
+[[pool]]
+address = "0x44d7dd237001aef7fc7d8cb13ab4452f65ce5e40"
+exchange = "aerodrome"
+kind = "solidly"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+
+[[pool]]
+address = "0x48424f43a7239a01831ca4fbf98a6a553d66d49d"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 500
+
+[[pool]]
+address = "0x486d1e5e5f97f44ea8db217598c1e61e21f54084"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+fee_bps = 500
+
+[[pool]]
+address = "0x48ad1e2e7c447f6814e69aefe3f0203a0cc128af"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+fee_bps = 10000
+
+[[pool]]
+address = "0x4af882a4d9c657d3c92aeb6126f5901699693417"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 500
+
+[[pool]]
+address = "0x4c1e404a013bf1917faf2dbf5e5cef3e9bafb5aa"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+fee_bps = 100
+
+[[pool]]
+address = "0x4c36388be6f416a29c8d8eee81c771ce6be14b18"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 500
+
+[[pool]]
+address = "0x4f5f4b7381b2445937dab831fc1952ecbb834e53"
+exchange = "aerodrome"
+kind = "uniswap_v2"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+
+[[pool]]
+address = "0x4fe4a5f570b046e3704acd72fef6c508a310d3aa"
+exchange = "uniswap-v2"
+kind = "uniswap_v2"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+fee_bps = 30
+
+[[pool]]
+address = "0x4fefc6745c3cbdc8069f6133f61a0951467ddf3f"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 10000
+
+[[pool]]
+address = "0x55b40f8911402568414ec6e7e0d2d87c3d19e65c"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 100
+
+[[pool]]
+address = "0x622e7f08240df5f294e6088456eb893105f3e179"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 500
+
+[[pool]]
+address = "0x63dc40427266eb899a9305383761647b4604690e"
+exchange = "uniswap-v2"
+kind = "uniswap_v2"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+fee_bps = 30
+
+[[pool]]
+address = "0x67b00b46fa4f4f24c03855c5c8013c0b938b3eec"
+exchange = "aerodrome"
+kind = "solidly"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+
+[[pool]]
+address = "0x6c561b446416e1a00e8e93e221854d6ea4171372"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+fee_bps = 3000
+
+[[pool]]
+address = "0x6eab8c1b93f5799dadf2c687a30230a540dbd636"
+exchange = "aerodrome"
+kind = "solidly"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+
+[[pool]]
+address = "0x6ef112968283869e99dc8a6bccc7346302c3bdba"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+fee_bps = 10000
+
+[[pool]]
+address = "0x72ab388e2e2f6facef59e3c3fa2c4e29011c2d38"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+fee_bps = 100
+
+[[pool]]
+address = "0x72d0c3728ef9af20ef0a1736cf6c21962d9b9873"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 3000
+
+[[pool]]
+address = "0x751864805accc54ce46e09fb7f6c46c907ac8590"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+fee_bps = 100
+
+[[pool]]
+address = "0x7aea2e8a3843516afa07293a10ac8e49906dabd1"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+fee_bps = 500
+
+[[pool]]
+address = "0x88476f48939c802ea75eed438a3576efc202b5dd"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+fee_bps = 100
+
+[[pool]]
+address = "0x88a43bbdf9d098eec7bceda4e2494615dfd9bb9c"
+exchange = "uniswap-v2"
+kind = "uniswap_v2"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+fee_bps = 30
+
+[[pool]]
+address = "0x8c7080564b5a792a33ef2fd473fba6364d5495e5"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+fee_bps = 3000
+
+[[pool]]
+address = "0x8f5fe1aa4f82f26ebfe73663ebac0800b9e7686d"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+fee_bps = 100
+
+[[pool]]
+address = "0x917bab0544beb0e681d02cc159f50446a7a38633"
+exchange = "aerodrome"
+kind = "uniswap_v2"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+
+[[pool]]
+address = "0x92722287d2819012dd8ec07b4e426ac00dd11103"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 500
+
+[[pool]]
+address = "0x9287c921f5d920ceee0d07d7c58d476e46acc640"
+exchange = "aerodrome"
+kind = "uniswap_v2"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+
+[[pool]]
+address = "0x93e8542e6ca0efffb9d57a270b76712b968a38f5"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+fee_bps = 500
+
+[[pool]]
+address = "0x950847d1dd451b67a2fc1795c0c9a53cf88e63a2"
+exchange = "uniswap-v2"
+kind = "uniswap_v2"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+fee_bps = 30
+
+[[pool]]
+address = "0x9bfa331679b307cf358438f45f6413a205fd3ebf"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+fee_bps = 500
+
+[[pool]]
+address = "0x9c38b55f9a9aba91bbcedeb12bf4428f47a6a0b8"
+exchange = "aerodrome"
+kind = "uniswap_v2"
+token0 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+
+[[pool]]
+address = "0xa97c08bc49c246e583a3557f2922daa9e5d1b404"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+fee_bps = 10000
+
+[[pool]]
+address = "0xb2839134b8151964f19f6f3c7d59c70ae52852f5"
+exchange = "uniswap-v2"
+kind = "uniswap_v2"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+fee_bps = 30
+
+[[pool]]
+address = "0xb3dfc382ff41a76a0db72e1d87c2a831caeace5e"
+exchange = "aerodrome"
+kind = "uniswap_v2"
+token0 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+
+[[pool]]
+address = "0xb4885bc63399bf5518b994c1d0c153334ee579d0"
+exchange = "aerodrome"
+kind = "uniswap_v2"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+
+[[pool]]
+address = "0xb4cb800910b228ed3d0834cf79d697127bbb00e5"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+fee_bps = 100
+
+[[pool]]
+address = "0xb775272e537cc670c65dc852908ad47015244eaf"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+fee_bps = 500
+
+[[pool]]
+address = "0xb94b22332abf5f89877a14cc88f2abc48c34b3df"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+fee_bps = 100
+
+[[pool]]
+address = "0xbd65764c8eb1b8858d323066f488b73f6fe22dc9"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+fee_bps = 10000
+
+[[pool]]
+address = "0xc078e01b31a3db4af0ed218c028c32bcefc00a40"
+exchange = "aerodrome"
+kind = "solidly"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+
+[[pool]]
+address = "0xc18f50d6a832f12f6dcaaeee8d0c87a65b96787e"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+fee_bps = 100
+
+[[pool]]
+address = "0xc211e1f853a898bd1302385ccde55f33a8c4b3f3"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+fee_bps = 100
+
+[[pool]]
+address = "0xc32493df87bdd8b8db551a6312a7e6940db0a399"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+fee_bps = 3000
+
+[[pool]]
+address = "0xc5accd3e4f6df1912498775807e0972b3ec43f29"
+exchange = "uniswap-v2"
+kind = "uniswap_v2"
+token0 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 30
+
+[[pool]]
+address = "0xc986bd739c99f4fda7b82a8bcb49cb159bf5c993"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 3000
+
+[[pool]]
+address = "0xcdac0d6c6c59727a65f871236188350531885c43"
+exchange = "aerodrome"
+kind = "uniswap_v2"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+
+[[pool]]
+address = "0xd0b53d9277642d899df5c87a3966a349a798f224"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+fee_bps = 500
+
+[[pool]]
+address = "0xd974d59e30054cf1abeded0c9947b0d8baf90029"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+fee_bps = 500
+
+[[pool]]
+address = "0xdcf81663e68f076ef9763442de134fd0699de4ef"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+fee_bps = 3000
+
+[[pool]]
+address = "0xde3fc25c6f79f87c6f84b31c3e3842d89a1bf611"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 3000
+
+[[pool]]
+address = "0xdeabdc16042b871934b6ea2afdb2da824c9cd315"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 500
+
+[[pool]]
+address = "0xe4eff19c7ace186ba39fd3ed639b2d34171f7eff"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 100
+
+[[pool]]
+address = "0xe513d88b4894ea0281b3dbe0066b8a72f103c125"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 10000
+
+[[pool]]
+address = "0xe584fe0c7505025c3819c82c99944b79a7cc009d"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 10000
+
+[[pool]]
+address = "0xe58b73ff901325b8b2056b29712c50237242f520"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 500
+
+[[pool]]
+address = "0xe5947c01fb3a4b6703f9416c29ff736285bfd403"
+exchange = "uniswap-v2"
+kind = "uniswap_v2"
+token0 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+fee_bps = 30
+
+[[pool]]
+address = "0xe63174bc0ee37b76d28956b680af6ba4c508f48a"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+fee_bps = 3000
+
+[[pool]]
+address = "0xe902ef54e437967c8b37d30e80ff887955c90db6"
+exchange = "uniswap-v2"
+kind = "uniswap_v2"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 30
+
+[[pool]]
+address = "0xe9e25e35aa99a2a60155010802b81a25c45ba185"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+fee_bps = 100
+
+[[pool]]
+address = "0xec558e484cc9f2210714e345298fdc53b253c27d"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+fee_bps = 3000
+
+[[pool]]
+address = "0xf6c0a374a483101e04ef5f7ac9bd15d9142bac95"
+exchange = "pancakeswap-v3"
+kind = "uniswap_v3"
+token0 = "0x4200000000000000000000000000000000000006"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 100
+
+[[pool]]
+address = "0xfbb6eed8e7aa03b138556eedaf5d271a5e1e43ef"
+exchange = "uniswap-v3"
+kind = "uniswap_v3"
+token0 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+token1 = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+fee_bps = 500
+
+[[pool]]
+address = "0xfd58d5253a497bab25d3f3e998617f9011d30f65"
+exchange = "uniswap-v2"
+kind = "uniswap_v2"
+token0 = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"
+token1 = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+fee_bps = 30
