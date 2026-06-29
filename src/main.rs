@@ -35,6 +35,43 @@ enum Command {
     Scan(ScanArgs),
     /// Verify offline sims are wei-exact vs on-chain quoters (requires --features live-rpc).
     Verify(VerifyArgs),
+    /// Verify the event-driven V3 syncer: replay logs, assert state == chain.
+    VerifySync(VerifySyncArgs),
+    /// Watch live: print net-positive USDC→…→USDC arb opportunities each block.
+    #[command(name = "watch-arb")]
+    WatchArb(WatchArbArgs),
+}
+
+#[derive(Args)]
+struct WatchArbArgs {
+    /// Chain to watch (currently base only).
+    #[arg(long)]
+    chain: String,
+    /// Probe trade size in whole base-token (USDC) units.
+    #[arg(long, default_value_t = 1000)]
+    amount: u64,
+    /// Only print cycles with net profit >= this many USDC base units (1e6 = 1 USDC).
+    #[arg(long, default_value_t = 0)]
+    min_profit: u64,
+    /// Max hops in a USDC→…→USDC cycle (2 is lightest; higher = more RPC/block).
+    #[arg(long, default_value_t = 2)]
+    max_hops: usize,
+    /// Max opportunities to print per block.
+    #[arg(long, default_value_t = 20)]
+    top: usize,
+    /// Stop after this many seconds (0 = run until Ctrl-C).
+    #[arg(long, default_value_t = 0)]
+    secs: u64,
+    /// V3 windowed init: ±this many ticks (0 = full map; smaller = faster start).
+    #[arg(long, default_value_t = 20000)]
+    window: i32,
+    /// Full re-sync from chain every N seconds (drift safety net; 0 = never).
+    #[arg(long, default_value_t = 180)]
+    resync_secs: u64,
+    /// Print every screened candidate with its on-chain confirmation result
+    /// (shows what looked profitable + why it was/wasn't real).
+    #[arg(long)]
+    show_screened: bool,
 }
 
 #[derive(Args)]
@@ -45,6 +82,22 @@ struct VerifyArgs {
     /// Max pools to check per family (bounds RPC usage).
     #[arg(long, default_value_t = 5)]
     max_pools: usize,
+}
+
+#[derive(Args)]
+struct VerifySyncArgs {
+    /// Chain to verify (currently base only).
+    #[arg(long)]
+    chain: String,
+    /// Max V3 pools to check.
+    #[arg(long, default_value_t = 3)]
+    max_pools: usize,
+    /// How many blocks of history to replay (init at head-5-lookback).
+    #[arg(long, default_value_t = 100)]
+    lookback: u64,
+    /// Approach C: init only ±this many ticks around current (0 = full map).
+    #[arg(long, default_value_t = 0)]
+    window: i32,
 }
 
 #[derive(Args)]
@@ -171,6 +224,20 @@ fn main() {
                 fail("verify is currently Base-only");
             }
             verify_command(chain, args.max_pools);
+        }
+        Command::VerifySync(args) => {
+            let chain = arb::config::Chain::parse(&args.chain).unwrap_or_else(|e| fail(&e));
+            if chain != arb::config::Chain::Base {
+                fail("verify-sync is currently Base-only");
+            }
+            verify_sync_command(chain, args.max_pools, args.lookback, args.window);
+        }
+        Command::WatchArb(args) => {
+            let chain = arb::config::Chain::parse(&args.chain).unwrap_or_else(|e| fail(&e));
+            if chain != arb::config::Chain::Base {
+                fail("watch-arb is currently Base-only");
+            }
+            watch_arb_command(chain, args.amount, args.min_profit, args.max_hops, args.top, args.secs, args.window, args.resync_secs, args.show_screened);
         }
         Command::Simulate(args) => {
             let sel = args.chain.selection();
@@ -501,6 +568,93 @@ fn verify_command(chain: arb::config::Chain, max_pools: usize) {
         }
         Err(e) => fail(&format!("verify error: {e}")),
     }
+}
+
+#[cfg(feature = "live-rpc")]
+#[allow(clippy::too_many_arguments)]
+fn watch_arb_command(chain: arb::config::Chain, amount: u64, min_profit: u64, max_hops: usize, top: usize, secs: u64, window: i32, resync_secs: u64, show_screened: bool) {
+    use arb::book::{PoolBook, Tier};
+    use arb::graph::Graph;
+    use arb::live::base::synced::watch;
+    use arb::types::U256;
+
+    let chain_name = chain.to_string();
+    let url = std::env::var(chain.rpc_env_var())
+        .unwrap_or_else(|_| fail(&format!("set ${} to your Alchemy Base WS endpoint", chain.rpc_env_var())));
+    let book = PoolBook::load(PoolBook::path_for_chain(&chain_name, Tier::Official))
+        .unwrap_or_else(|e| fail(&format!("load official book: {e} (run `arb scan` first)")));
+    let usdc = book.tokens.get("USDC").unwrap_or_else(|| fail("no USDC in book")).address;
+    let weth = book.tokens.get("WETH").map(|t| t.address);
+    let dec = book.tokens.get("USDC").map(|t| t.decimals).unwrap_or(6);
+
+    let graph = Graph::from_book(&book);
+    let cycles = graph.cycles(usdc, max_hops);
+    let scale = U256::from(10u64).pow(U256::from(dec as u64));
+    let amount_in = U256::from(amount) * scale;
+    let min_profit = U256::from(min_profit);
+
+    println!(
+        "watch-arb: chain={chain_name} cycles={} amount={amount} USDC min_profit={min_profit} base-units (Ctrl-C to stop)",
+        cycles.len()
+    );
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|e| fail(&format!("tokio runtime: {e}")));
+    let run_for = (secs > 0).then(|| std::time::Duration::from_secs(secs));
+    if let Err(e) = rt.block_on(watch(&url, &book, &cycles, usdc, weth, amount_in, min_profit, top, window, run_for, resync_secs, show_screened)) {
+        fail(&format!("watch error: {e}"));
+    }
+}
+
+#[cfg(feature = "live-rpc")]
+fn verify_sync_command(chain: arb::config::Chain, max_pools: usize, lookback: u64, window: i32) {
+    use arb::book::{PoolBook, Tier};
+    use arb::live::base::verify::verify_v3_sync;
+
+    let chain_name = chain.to_string();
+    let url = std::env::var(chain.rpc_env_var())
+        .unwrap_or_else(|_| fail(&format!("set ${}", chain.rpc_env_var())));
+    let book = PoolBook::load(PoolBook::path_for_chain(&chain_name, Tier::Official))
+        .unwrap_or_else(|e| fail(&format!("load official book: {e}")));
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|e| fail(&format!("tokio runtime: {e}")));
+    let mode = if window > 0 { format!("windowed ±{window} ticks") } else { "full map".into() };
+    println!("verifying event-driven V3 sync (replay {lookback} blocks, max {max_pools} pools, {mode})...");
+    match rt.block_on(verify_v3_sync(&url, &book, max_pools, lookback, window)) {
+        Ok(r) => {
+            println!(
+                "\nblock {} | pools {} | checks {} | passed {} | window-skips {} | mismatches {}",
+                r.block, r.pools_checked, r.quotes_checked, r.passed, r.window_skips, r.mismatches.len()
+            );
+            for m in r.mismatches.iter().take(30) {
+                println!("  MISMATCH {} ({}) in={} amt={} mine={} chain={}", m.pool, m.exchange, m.token_in, m.amount_in, m.mine, m.chain);
+            }
+            if r.ok() {
+                println!("\n✅ EVENT-SYNC EXACT: replayed state matches chain + QuoterV2 to the wei.");
+            } else {
+                println!("\n❌ event-sync NOT exact: {} mismatches.", r.mismatches.len());
+                std::process::exit(1);
+            }
+        }
+        Err(e) => fail(&format!("verify-sync error: {e}")),
+    }
+}
+
+#[cfg(not(feature = "live-rpc"))]
+fn verify_sync_command(_chain: arb::config::Chain, _max_pools: usize, _lookback: u64, _window: i32) {
+    eprintln!("verify-sync requires --features live-rpc");
+    std::process::exit(1);
+}
+
+#[cfg(not(feature = "live-rpc"))]
+#[allow(clippy::too_many_arguments)]
+fn watch_arb_command(_chain: arb::config::Chain, _amount: u64, _min_profit: u64, _max_hops: usize, _top: usize, _secs: u64, _window: i32, _resync_secs: u64, _show_screened: bool) {
+    eprintln!("watch-arb requires the RPC backend: cargo run --features live-rpc -- watch-arb --chain base");
+    std::process::exit(1);
 }
 
 #[cfg(not(feature = "live-rpc"))]

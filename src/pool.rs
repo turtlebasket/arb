@@ -37,6 +37,11 @@ pub enum SimError {
     Overflow,
     #[error("pool misconfigured: {0}")]
     BadConfig(&'static str),
+    /// The cached tick window does not cover this swap (V3 windowed state): the
+    /// trade would move price beyond the fetched range. Widen the window and
+    /// refetch. Never returned with a (silently wrong) value.
+    #[error("incomplete state: swap exceeds the cached tick window")]
+    IncompleteState,
 }
 
 /// A simulatable liquidity pool.

@@ -45,6 +45,10 @@ pub struct UniV3Pool {
     pub tick_spacing: i32,
     /// Initialized ticks, sorted ascending by `tick`.
     pub ticks: Vec<TickData>,
+    /// Tick range `[min, max]` for which `ticks` is COMPLETE (windowed state).
+    /// `None` = full-range data. A swap that would move price beyond this window
+    /// returns [`SimError::IncompleteState`] instead of a wrong value.
+    pub known_range: Option<(i32, i32)>,
     tokens: [Address; 2],
 }
 
@@ -72,8 +76,15 @@ impl UniV3Pool {
             tick,
             tick_spacing: tick_spacing.max(1),
             ticks,
+            known_range: None,
             tokens: [token0, token1],
         }
+    }
+
+    /// Mark the tick data as complete only within `[min, max]` (windowed state).
+    pub fn with_known_range(mut self, min: i32, max: i32) -> Self {
+        self.known_range = Some((min, max));
+        self
     }
 
     /// TickMath.getSqrtRatioAtTick — Q64.96 sqrt price for a tick.
@@ -392,10 +403,21 @@ impl Pool for UniV3Pool {
             return Err(SimError::UnknownToken(token_out));
         };
 
+        // Price limit = chain bound, OR the window bound for windowed state so a
+        // swap that would exit the known range stops at the edge (detected below)
+        // instead of pretending the unfetched region is empty.
         let sqrt_price_limit = if zero_for_one {
-            min_sqrt_ratio() + U256::from(1u64)
+            let chain = min_sqrt_ratio() + U256::from(1u64);
+            match self.known_range {
+                Some((lo, _)) if lo > MIN_TICK => Self::get_sqrt_ratio_at_tick(lo)?.max(chain),
+                _ => chain,
+            }
         } else {
-            max_sqrt_ratio() - U256::from(1u64)
+            let chain = max_sqrt_ratio() - U256::from(1u64);
+            match self.known_range {
+                Some((_, hi)) if hi < MAX_TICK => Self::get_sqrt_ratio_at_tick(hi)?.min(chain),
+                _ => chain,
+            }
         };
 
         let mut amount_remaining = amount_in;
@@ -468,6 +490,15 @@ impl Pool for UniV3Pool {
                 // Input exhausted before the boundary — done.
                 break;
             }
+        }
+
+        // Windowed state: if we stopped at the window edge with input left, the
+        // trade exceeds our fetched ticks — signal rather than return a wrong value.
+        if self.known_range.is_some()
+            && !amount_remaining.is_zero()
+            && sqrt_price == sqrt_price_limit
+        {
+            return Err(SimError::IncompleteState);
         }
 
         Ok(amount_calculated)
@@ -628,6 +659,40 @@ mod tests {
     }
 
     // ---- End-to-end swap: single active range, no tick crossing ----
+    #[test]
+    fn windowed_state_matches_within_window_and_flags_beyond() {
+        // Full pool: liquidity across [-60000, 60000].
+        let t0 = Address::repeat_byte(1);
+        let t1 = Address::repeat_byte(2);
+        let ticks = vec![
+            TickData { tick: -60_000, liquidity_net: 5_000_000_000_000_000_000i128 },
+            TickData { tick: 60_000, liquidity_net: -5_000_000_000_000_000_000i128 },
+        ];
+        let full = UniV3Pool::new(
+            Address::repeat_byte(9), t0, t1, 500, q96_val(),
+            5_000_000_000_000_000_000u128, 0, 10, ticks.clone(),
+        );
+        // Windowed copy that only "knows" ticks within [-600, 600].
+        let windowed = UniV3Pool::new(
+            Address::repeat_byte(9), t0, t1, 500, q96_val(),
+            5_000_000_000_000_000_000u128, 0, 10, ticks,
+        )
+        .with_known_range(-600, 600);
+
+        // A small trade stays well within the window -> identical to full data.
+        let small = dec("1000000000000000"); // 1e15
+        assert_eq!(
+            windowed.quote(t0, t1, small).unwrap(),
+            full.quote(t0, t1, small).unwrap()
+        );
+
+        // A trade large enough to push price past the window -> flagged, not wrong.
+        let big = dec("100000000000000000000"); // 100e18
+        assert_eq!(windowed.quote(t0, t1, big), Err(SimError::IncompleteState));
+        // ...while the full-data pool still quotes it fine.
+        assert!(full.quote(t0, t1, big).is_ok());
+    }
+
     #[test]
     fn single_range_swap_consumes_input() {
         // A pool at price 1 with a single wide liquidity range. Swapping a small

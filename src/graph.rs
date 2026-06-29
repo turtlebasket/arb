@@ -80,7 +80,7 @@ impl Graph {
             }
             if e.to == base {
                 // closing edge -> cycle of length len+1
-                if len + 1 >= 2 && len + 1 <= max_hops {
+                if len + 1 >= 2 && len < max_hops {
                     let mut c = path.clone();
                     c.push(e.clone());
                     out.push(c);

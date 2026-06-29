@@ -5,6 +5,7 @@
 //!   - index 0: P(our arb tx lands on time)                = 0.50
 //!   - index 1: P(it lands 1 swap/event late)              = 0.25
 //!   - index 2: P(it lands 2 swaps/events late)            = 0.25
+//!
 //! Index = how many subsequent swap events execute against the target pool(s)
 //! before our transaction does. The weights must sum to exactly 1.
 //!

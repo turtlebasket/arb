@@ -18,7 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use alloy::providers::{Provider, ProviderBuilder, WsConnect};
+use alloy::providers::Provider;
 use alloy::rpc::types::{Filter, TransactionInput, TransactionRequest};
 use alloy_primitives::{keccak256, Bytes, TxKind};
 
@@ -261,10 +261,7 @@ pub async fn scan(
     window: u64,
     do_forks: bool,
 ) -> Result<ScanReport, SourceError> {
-    let provider = ProviderBuilder::new()
-        .connect_ws(WsConnect::new(ws_url.to_string()))
-        .await
-        .map_err(|e| SourceError::Rpc(e.to_string()))?;
+    let provider = crate::live::base::rpc::connect(ws_url).await?;
 
     let mut report = ScanReport {
         from_block,

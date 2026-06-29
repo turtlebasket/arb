@@ -21,6 +21,10 @@ pub mod flashblocks;
 #[cfg(feature = "live-rpc")]
 pub mod scan;
 
+/// Shared WS provider with retry/backoff (network-bound).
+#[cfg(feature = "live-rpc")]
+pub mod rpc;
+
 /// Exact offline-sim construction from live state (shared by price + verify).
 #[cfg(feature = "live-rpc")]
 pub mod loader;
@@ -32,6 +36,14 @@ pub mod price;
 /// Exact V3 state (full tick data) fetching (network-bound).
 #[cfg(feature = "live-rpc")]
 pub mod v3state;
+
+/// Event-driven incremental V3 state sync (network-bound).
+#[cfg(feature = "live-rpc")]
+pub mod v3sync;
+
+/// Synced live registry + watcher (~0 RPC/block) (network-bound).
+#[cfg(feature = "live-rpc")]
+pub mod synced;
 
 /// On-chain ground-truth quoters (network-bound).
 #[cfg(feature = "live-rpc")]

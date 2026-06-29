@@ -9,11 +9,12 @@
 use std::collections::HashMap;
 
 use alloy::eips::BlockId;
-use alloy::providers::{Provider, ProviderBuilder, WsConnect};
+use alloy::providers::Provider;
 
 use crate::book::{PoolBook, PoolInfo};
 use crate::live::base::groundtruth::{self, GtOutcome};
 use crate::live::base::loader::load_sim;
+use crate::live::base::{v3state, v3sync};
 use crate::live::source::SourceError;
 use crate::types::{Address, U256};
 
@@ -37,6 +38,9 @@ pub struct VerifyReport {
     pub pools_checked: usize,
     pub quotes_checked: usize,
     pub passed: usize,
+    /// Windowed-state quotes that exceeded the tick window (correctly signalled
+    /// `IncompleteState` rather than a wrong value) — not failures.
+    pub window_skips: usize,
     pub mismatches: Vec<Mismatch>,
 }
 
@@ -61,8 +65,9 @@ fn sweep(dec: u8) -> Vec<U256> {
     .collect()
 }
 
-/// On-chain ground-truth quote for a pool, dispatched by family.
-async fn ground_truth<P: Provider>(
+/// On-chain ground-truth quote for a pool, dispatched by family. Pinned to a
+/// block, so threading a cycle through these gives a consistent on-chain check.
+pub async fn ground_truth<P: Provider>(
     provider: &P,
     p: &PoolInfo,
     token_in: Address,
@@ -129,16 +134,105 @@ fn reconcile(
     }
 }
 
+/// Verify the EVENT-DRIVEN V3 syncer (Approach A): initialize each pool's state
+/// at block B, replay its Swap/Mint/Burn logs over (B, N], then assert the
+/// event-maintained state equals (a) a fresh `slot0` read at N and (b) QuoterV2
+/// at N to the wei. This proves incremental sync reconstructs on-chain state
+/// exactly — no per-block refetch needed.
+pub async fn verify_v3_sync(
+    ws_url: &str,
+    book: &PoolBook,
+    max_pools: usize,
+    lookback: u64,
+    window: i32,
+) -> Result<VerifyReport, SourceError> {
+    let provider = crate::live::base::rpc::connect(ws_url).await?;
+    let head = provider.get_block_number().await.map_err(rpc)?;
+    let n = head.saturating_sub(5);
+    let b = n.saturating_sub(lookback);
+    let block_n = BlockId::from(n);
+    let decimals: HashMap<Address, u8> =
+        book.tokens.values().map(|t| (t.address, t.decimals)).collect();
+
+    let mut report = VerifyReport { block: n, ..Default::default() };
+    eprintln!("v3-sync verify: init@{b}, replay logs ({b},{n}], check @ {n}");
+
+    let v3_pools = book
+        .pools
+        .iter()
+        .filter(|p| p.kind == "uniswap_v3" && groundtruth::v3_quoter(&p.exchange).is_some())
+        .take(max_pools);
+
+    for p in v3_pools {
+        let quoter = groundtruth::v3_quoter(&p.exchange).unwrap();
+        let fee = p.fee_bps.unwrap_or(0);
+        // 1) init at B (full map, or Approach C windowed if window > 0)
+        let init = if window > 0 {
+            v3sync::V3PoolState::from_chain_windowed(
+                &provider, p.address, p.token0, p.token1, fee, b, window,
+            )
+            .await
+        } else {
+            v3sync::V3PoolState::from_chain(&provider, p.address, p.token0, p.token1, fee, b).await
+        };
+        let mut state = match init {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        // 2) replay events (B, N]
+        let mut logs = v3sync::fetch_v3_logs(&provider, p.address, b + 1, n, 10).await?;
+        let n_events = logs.len();
+        state.apply_logs(&mut logs);
+        report.pools_checked += 1;
+        eprintln!("  {} {} replayed {} events", p.exchange, p.address, n_events);
+
+        // 3a) scalar check vs fresh slot0 @ N
+        if let Ok(fresh) = v3state::fetch_slot0(&provider, p.address, block_n).await {
+            report.quotes_checked += 1;
+            if fresh.sqrt_price_x96 == state.sqrt_price_x96
+                && fresh.liquidity == state.liquidity
+                && fresh.tick == state.tick
+            {
+                report.passed += 1;
+            } else {
+                report.mismatches.push(Mismatch {
+                    pool: p.address,
+                    exchange: format!("{}/scalars", p.exchange),
+                    token_in: Address::ZERO,
+                    amount_in: U256::ZERO,
+                    mine: format!("sqrt={} liq={} tick={}", state.sqrt_price_x96, state.liquidity, state.tick),
+                    chain: format!("sqrt={} liq={} tick={}", fresh.sqrt_price_x96, fresh.liquidity, fresh.tick),
+                });
+            }
+        }
+
+        // 3b) quote check vs QuoterV2 @ N
+        let d0 = decimals.get(&p.token0).copied().unwrap_or(18);
+        let d1 = decimals.get(&p.token1).copied().unwrap_or(18);
+        for (tin, tout, din) in [(p.token0, p.token1, d0), (p.token1, p.token0, d1)] {
+            for amt in sweep(din) {
+                let mine = state.quote(tin, tout, amt);
+                // Out-of-window (Approach C): correctly signalled, not a failure.
+                if matches!(mine, Err(crate::pool::SimError::IncompleteState)) {
+                    report.window_skips += 1;
+                    continue;
+                }
+                let chain =
+                    groundtruth::quote_v3(&provider, quoter, tin, tout, amt, fee, block_n).await?;
+                reconcile(mine, &chain, p, tin, amt, &mut report);
+            }
+        }
+    }
+    Ok(report)
+}
+
 /// Verify supported pools wei-exact at one pinned block (`max_per_family` each).
 pub async fn verify_all(
     ws_url: &str,
     book: &PoolBook,
     max_per_family: usize,
 ) -> Result<VerifyReport, SourceError> {
-    let provider = ProviderBuilder::new()
-        .connect_ws(WsConnect::new(ws_url.to_string()))
-        .await
-        .map_err(rpc)?;
+    let provider = crate::live::base::rpc::connect(ws_url).await?;
     let head = provider.get_block_number().await.map_err(rpc)?;
     let b = head.saturating_sub(5);
     let block = BlockId::from(b);
@@ -183,10 +277,7 @@ pub async fn verify_all(
         for (tin, tout, din) in [(p.token0, p.token1, d0), (p.token1, p.token0, d1)] {
             for amt in sweep(din) {
                 let mine = sim.quote(tin, tout, amt);
-                match ground_truth(&provider, p, tin, tout, amt, block).await? {
-                    Some(chain) => reconcile(mine, &chain, p, tin, amt, &mut report),
-                    None => {}
-                }
+                if let Some(chain) = ground_truth(&provider, p, tin, tout, amt, block).await? { reconcile(mine, &chain, p, tin, amt, &mut report) }
             }
         }
     }

@@ -90,11 +90,56 @@ pub async fn fetch_ticks<P: Provider>(
     tick_spacing: i32,
     block: BlockId,
 ) -> Result<Vec<TickData>, SourceError> {
+    Ok(fetch_ticks_full(provider, pool, tick_spacing, block)
+        .await?
+        .into_iter()
+        .map(|(tick, _gross, net)| TickData { tick, liquidity_net: net })
+        .collect())
+}
+
+/// Like [`fetch_ticks`] but also returns `liquidityGross` per tick — needed by
+/// the event-driven syncer to know when a tick becomes (un)initialized.
+/// Returns `(tick, liquidityGross, liquidityNet)`.
+pub async fn fetch_ticks_full<P: Provider>(
+    provider: &P,
+    pool: Address,
+    tick_spacing: i32,
+    block: BlockId,
+) -> Result<Vec<(i32, u128, i128)>, SourceError> {
+    let min_word = word_pos(compress(MIN_TICK, tick_spacing));
+    let max_word = word_pos(compress(MAX_TICK, tick_spacing));
+    read_ticks_in_words(provider, pool, tick_spacing, block, min_word, max_word).await
+}
+
+/// Approach C: fetch only the ticks within `[lo_tick, hi_tick]` (the bounded
+/// window the largest probe trade can reach), instead of the whole map.
+pub async fn fetch_ticks_window<P: Provider>(
+    provider: &P,
+    pool: Address,
+    tick_spacing: i32,
+    block: BlockId,
+    lo_tick: i32,
+    hi_tick: i32,
+) -> Result<Vec<(i32, u128, i128)>, SourceError> {
+    let lo = lo_tick.clamp(MIN_TICK, MAX_TICK);
+    let hi = hi_tick.clamp(MIN_TICK, MAX_TICK);
+    let min_word = word_pos(compress(lo, tick_spacing));
+    let max_word = word_pos(compress(hi, tick_spacing));
+    read_ticks_in_words(provider, pool, tick_spacing, block, min_word, max_word).await
+}
+
+/// Read all initialized ticks (+gross/net) within an inclusive bitmap-word range.
+async fn read_ticks_in_words<P: Provider>(
+    provider: &P,
+    pool: Address,
+    tick_spacing: i32,
+    block: BlockId,
+    min_word: i16,
+    max_word: i16,
+) -> Result<Vec<(i32, u128, i128)>, SourceError> {
     let mc = IMulticall3::new(MULTICALL3, provider);
 
     // 1. Read all bitmap words across the range, batched.
-    let min_word = word_pos(compress(MIN_TICK, tick_spacing));
-    let max_word = word_pos(compress(MAX_TICK, tick_spacing));
     let mut bitmap_calls = Vec::new();
     let mut words = Vec::new();
     for w in min_word..=max_word {
@@ -139,8 +184,8 @@ pub async fn fetch_ticks<P: Provider>(
     }
     initialized.sort_unstable();
 
-    // 2. Read liquidityNet for each initialized tick, batched.
-    let mut out = Vec::with_capacity(initialized.len());
+    // 2. Read liquidityGross + liquidityNet for each initialized tick, batched.
+    let mut out: Vec<(i32, u128, i128)> = Vec::with_capacity(initialized.len());
     for chunk in initialized.chunks(CHUNK) {
         let calls: Vec<IMulticall3::Call3> = chunk
             .iter()
@@ -159,7 +204,7 @@ pub async fn fetch_ticks<P: Provider>(
             }
             let decoded = IUniswapV3Pool::ticksCall::abi_decode_returns(&res.returnData)
                 .map_err(rpc)?;
-            out.push(TickData { tick: t, liquidity_net: decoded.liquidityNet });
+            out.push((t, decoded.liquidityGross, decoded.liquidityNet));
         }
     }
     Ok(out)

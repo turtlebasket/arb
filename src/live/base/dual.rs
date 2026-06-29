@@ -263,10 +263,7 @@ pub async fn run_dual<S: ChainSource, P: PreconfSource>(
                 }
                 None => {}
             },
-            fb = flash_stream.next() => match fb {
-                Some(fb) => { state.apply_flashblock(&fb); }
-                None => {}
-            },
+            fb = flash_stream.next() => if let Some(fb) = fb { state.apply_flashblock(&fb); },
             else => break,
         }
     }

@@ -95,16 +95,16 @@ impl Exchange {
 
     /// Whether this exchange is deployed on the given chain.
     pub fn supported_on(&self, chain: Chain) -> bool {
-        match (self, chain) {
-            (Exchange::UniswapV2 | Exchange::UniswapV3, Chain::Base) => true,
-            (Exchange::Aerodrome | Exchange::AerodromeSlipstream, Chain::Base) => true,
-            (Exchange::BalancerV2 | Exchange::Curve, Chain::Base) => true,
-            (Exchange::PancakeV2 | Exchange::PancakeV3, Chain::Bsc) => true,
-            (Exchange::UniswapV2 | Exchange::UniswapV3, Chain::Bsc) => true,
-            (Exchange::Curve | Exchange::BalancerV2, Chain::Bsc) => true,
-            (Exchange::SunSwap, Chain::Tron) => true,
-            _ => false,
-        }
+        matches!(
+            (self, chain),
+            (Exchange::UniswapV2 | Exchange::UniswapV3, Chain::Base)
+                | (Exchange::Aerodrome | Exchange::AerodromeSlipstream, Chain::Base)
+                | (Exchange::BalancerV2 | Exchange::Curve, Chain::Base)
+                | (Exchange::PancakeV2 | Exchange::PancakeV3, Chain::Bsc)
+                | (Exchange::UniswapV2 | Exchange::UniswapV3, Chain::Bsc)
+                | (Exchange::Curve | Exchange::BalancerV2, Chain::Bsc)
+                | (Exchange::SunSwap, Chain::Tron)
+        )
     }
 }
 
