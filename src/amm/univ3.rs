@@ -331,22 +331,30 @@ impl UniV3Pool {
         if tick % spacing != 0 && tick < 0 {
             compressed -= 1; // floor toward -inf, matching Solidity
         }
+        // `ticks` is sorted ascending (see `liquidity_net_at`), so the
+        // greatest/least initialized tick in `[lo, hi]` is found with a binary
+        // search — O(log n) per step instead of an O(n) scan, which matters
+        // because this runs once per tick-crossing iteration of the swap loop.
         if lte {
             let word_pos = compressed >> 8;
             let lo = (word_pos << 8) * spacing; // lowest tick in this word
             let hi = compressed * spacing; // current tick rounded down to spacing
-            match self.ticks.iter().rev().find(|t| t.tick >= lo && t.tick <= hi) {
-                Some(t) => (t.tick, true),
-                None => (lo, false),
+            // greatest tick <= hi; initialized iff it is also >= lo.
+            let idx = self.ticks.partition_point(|t| t.tick <= hi);
+            match idx.checked_sub(1).map(|i| &self.ticks[i]) {
+                Some(t) if t.tick >= lo => (t.tick, true),
+                _ => (lo, false),
             }
         } else {
             let cp1 = compressed + 1;
             let word_pos = cp1 >> 8;
             let lo = cp1 * spacing;
             let hi = ((word_pos << 8) + 255) * spacing; // highest tick in word
-            match self.ticks.iter().find(|t| t.tick >= lo && t.tick <= hi) {
-                Some(t) => (t.tick, true),
-                None => (hi, false),
+            // least tick >= lo; initialized iff it is also <= hi.
+            let idx = self.ticks.partition_point(|t| t.tick < lo);
+            match self.ticks.get(idx) {
+                Some(t) if t.tick <= hi => (t.tick, true),
+                _ => (hi, false),
             }
         }
     }

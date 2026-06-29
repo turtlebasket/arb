@@ -62,7 +62,7 @@ fn registry_topics() -> Vec<B256> {
 }
 
 enum LiveKind {
-    V3(V3PoolState),
+    V3(Box<V3PoolState>),
     V2 { sim: UniV2Pool, last: (u64, u64) },
     AeroVol { sim: AerodromeVolatilePool, last: (u64, u64) },
     AeroStable { sim: SolidlyStablePool, last: (u64, u64) },
@@ -173,7 +173,7 @@ pub async fn build_live_pool<P: Provider>(
         return Ok(Some(LivePool {
             address: p.address,
             tokens: [p.token0, p.token1],
-            kind: LiveKind::V3(state),
+            kind: LiveKind::V3(Box::new(state)),
         }));
     }
     if p.exchange == "aerodrome" {
@@ -266,8 +266,143 @@ fn eth_usdc_ratio(reg: &HashMap<Address, LivePool>, usdc: Address, weth: Address
     U256::ZERO
 }
 
+/// Screen cycles in-memory then confirm the top candidates on-chain at
+/// `confirm_at` (a sealed block number, or `pending` for flashblock-preconfirmed
+/// state). Prints confirmed arbs (or every candidate under `show_screened`) and
+/// accumulates the best-per-tick into the running totals. `tag` labels output.
+#[allow(clippy::too_many_arguments)]
+async fn evaluate<P: Provider>(
+    provider: &P,
+    reg: &HashMap<Address, LivePool>,
+    info: &HashMap<Address, &PoolInfo>,
+    cycles: &[Vec<Edge>],
+    sym: &HashMap<Address, String>,
+    scale: U256,
+    amount_in: U256,
+    min_profit: U256,
+    top: usize,
+    max_confirm: usize,
+    gas_price: U256,
+    weth: Option<Address>,
+    usdc: Address,
+    confirm_at: alloy::eips::BlockId,
+    tag: &str,
+    show_screened: bool,
+    total_potential: &mut U256,
+    profitable_blocks: &mut u64,
+) -> Result<(), SourceError> {
+    let label = |a: &Address| sym.get(a).cloned().unwrap_or_else(|| format!("{a:#}"));
+    // gas_price is maintained by the caller on an interval — NOT fetched here.
+    // A per-eval RPC under free-tier rate-limiting would serialize and block the
+    // select loop (the deadline/Ctrl-C arms can't run while we await inside one).
+    let ratio = weth.map(|w| eth_usdc_ratio(reg, usdc, w)).unwrap_or(U256::ZERO);
+
+    // 1) cheap in-memory screen -> candidate cycle indices (+gas cost).
+    let mut cand: Vec<(U256, U256, usize)> = Vec::new(); // (sim_net, gas_cost, idx)
+    for (i, cyc) in cycles.iter().enumerate() {
+        let legs_pools: Option<Vec<&LivePool>> = cyc.iter().map(|e| reg.get(&e.pool)).collect();
+        let Some(pools) = legs_pools else { continue };
+        let legs: Vec<Leg> = cyc
+            .iter()
+            .zip(pools.iter())
+            .map(|(e, lp)| Leg { pool: *lp as &dyn Pool, token_in: e.from, token_out: e.to })
+            .collect();
+        if let Ok(r) = net_profit(&legs, amount_in, gas_price, ratio) {
+            if let Some(net) = r.net_profit {
+                if net >= min_profit {
+                    cand.push((net, r.gas_cost_in_token, i));
+                }
+            }
+        }
+    }
+    if cand.is_empty() {
+        return Ok(());
+    }
+    cand.sort_by(|a, b| b.0.cmp(&a.0));
+    cand.truncate(max_confirm.max(1)); // bound on-chain confirmations (RPC load)
+
+    // 2) CONFIRM each candidate against the chain at `confirm_at` (consistent
+    //    snapshot) — presence + exact values.
+    let mut confirmed: Vec<(U256, Vec<Address>, Vec<Address>)> = Vec::new();
+    let mut screened_lines: Vec<String> = Vec::new();
+    for (sim_net, gas_cost, i) in &cand {
+        let cyc = &cycles[*i];
+        let toks: Vec<Address> =
+            std::iter::once(cyc[0].from).chain(cyc.iter().map(|e| e.to)).collect();
+        let pools: Vec<Address> = cyc.iter().map(|e| e.pool).collect();
+        let cost = amount_in + *gas_cost;
+        // Bound each confirmation: a `pending`/sealed eth_call that never returns
+        // (silent RPC stall — not an error, so retry/backoff won't fire) must not
+        // block the watcher. On timeout we skip the cycle this tick.
+        let confirm = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            confirm_cycle(provider, info, cyc, amount_in, confirm_at),
+        )
+        .await;
+        let chain_desc = match confirm {
+            Ok(Ok(Some(gross))) if gross > cost => {
+                let net = gross - cost;
+                if net >= min_profit {
+                    confirmed.push((net, pools.clone(), toks.clone()));
+                }
+                format!("chain +{}.{:06}", net / scale, net % scale)
+            }
+            Ok(Ok(Some(gross))) => {
+                let d = cost - gross;
+                format!("chain -{}.{:06} (not profitable)", d / scale, d % scale)
+            }
+            Ok(Ok(None)) => "chain: reverts / not a real cycle".to_string(),
+            Ok(Err(e)) => format!("chain: error {e}"),
+            Err(_) => "chain: RPC timeout (skipped)".to_string(),
+        };
+        if show_screened {
+            let path: Vec<String> = toks.iter().map(&label).collect();
+            screened_lines.push(format!(
+                "  screened {} | screen +{}.{:06} | {} | pools={:?}",
+                path.join("->"),
+                sim_net / scale,
+                sim_net % scale,
+                chain_desc,
+                pools
+            ));
+        }
+    }
+
+    if show_screened {
+        println!("[{tag}] {} screened candidate(s):", cand.len());
+        for l in &screened_lines {
+            println!("{l}");
+        }
+    }
+
+    if !confirmed.is_empty() {
+        confirmed.sort_by(|a, b| b.0.cmp(&a.0));
+        if !show_screened {
+            println!("[{tag}] {} CONFIRMED arb(s) ({} screened):", confirmed.len(), cand.len());
+            for (net, pools, toks) in confirmed.iter().take(top) {
+                let path: Vec<String> = toks.iter().map(&label).collect();
+                println!(
+                    "  +{}.{:06} USDC | {} | pools={:?}",
+                    net / scale,
+                    net % scale,
+                    path.join("->"),
+                    pools
+                );
+            }
+        }
+        *total_potential += confirmed[0].0;
+        *profitable_blocks += 1;
+    } else if !show_screened {
+        eprintln!("[{tag}] screened {} candidate(s) -> 0 confirmed on-chain", cand.len());
+    }
+    Ok(())
+}
+
 /// Live watcher driven by the synced registry. ~0 RPC per block (only a gas-price
-/// read); pool state is maintained from the log subscription.
+/// read); pool state is maintained from the log subscription. When `flash_url` is
+/// `Some`, evaluation is driven at Flashblock cadence (~200ms) and candidates are
+/// confirmed against the `pending` block tag (flashblock-preconfirmed state), so
+/// arbs are surfaced as they form rather than only at seal.
 #[allow(clippy::too_many_arguments)]
 pub async fn watch(
     ws_url: &str,
@@ -282,6 +417,7 @@ pub async fn watch(
     run_for: Option<std::time::Duration>,
     resync_secs: u64,
     show_screened: bool,
+    flash_url: Option<String>,
 ) -> Result<(), SourceError> {
     let provider = crate::live::base::rpc::connect(ws_url).await?;
 
@@ -290,7 +426,6 @@ pub async fn watch(
     let info: HashMap<Address, &PoolInfo> = book.pools.iter().map(|p| (p.address, p)).collect();
     let sym: HashMap<Address, String> =
         book.tokens.iter().map(|(s, t)| (t.address, s.clone())).collect();
-    let label = |a: &Address| sym.get(a).cloned().unwrap_or_else(|| format!("{a:#}"));
     let scale = {
         let dec = book.tokens.values().find(|t| t.address == base_token).map(|t| t.decimals).unwrap_or(6);
         U256::from(10u64).pow(U256::from(dec as u64))
@@ -308,21 +443,58 @@ pub async fn watch(
         .into_stream();
     let mut heads = provider.subscribe_blocks().await.map_err(rpc)?.into_stream();
 
-    // Snapshot each pool at the current head B.
+    // Snapshot each pool at the current head B. Build pools CONCURRENTLY
+    // (bounded) — sequential init of dozens of windowed V3 pools is RPC-bound and
+    // slow on rate-limited tiers; bounded concurrency cuts it ~N× while staying
+    // under provider limits (RetryBackoffLayer self-throttles any 429s).
     let b = provider.get_block_number().await.map_err(rpc)?;
     eprintln!("synced watch: initializing {} pools @ block {b} (window={window})...", needed.len());
+    let init_t0 = std::time::Instant::now();
     let mut reg: HashMap<Address, LivePool> = HashMap::new();
-    for addr in &needed {
-        let Some(p) = info.get(addr) else { continue };
-        match build_live_pool(&provider, p, &decimals, b, window).await {
+    let built: Vec<(Address, Result<Option<LivePool>, SourceError>)> = futures::stream::iter(
+        needed.iter().filter_map(|addr| info.get(addr).map(|p| (*addr, *p))),
+    )
+    .map(|(addr, p)| {
+        let provider = &provider;
+        let decimals = &decimals;
+        async move { (addr, build_live_pool(provider, p, decimals, b, window).await) }
+    })
+    .buffer_unordered(8)
+    .collect()
+    .await;
+    for (addr, res) in built {
+        match res {
             Ok(Some(lp)) => {
-                reg.insert(*addr, lp);
+                reg.insert(addr, lp);
             }
             Ok(None) => {}
             Err(e) => eprintln!("  init {addr} failed: {e}"),
         }
     }
-    eprintln!("synced watch: {} pools live; streaming (Ctrl-C to stop)...", reg.len());
+    eprintln!(
+        "synced watch: {} pools live in {:.1}s; streaming (Ctrl-C to stop)...",
+        reg.len(),
+        init_t0.elapsed().as_secs_f64()
+    );
+
+    // Flashblock cadence (pending mode). When set, evaluation is driven by
+    // preconfirmations and confirmed against the `pending` tag; otherwise this is
+    // an empty stream and evaluation is driven by sealed blocks.
+    // IMPORTANT: a `select!` arm `Some(x) = stream.next()` over a TERMINATING
+    // stream (one that returns `Ready(None)`) is immediately-ready every poll and
+    // starves the other arms (the deadline/Ctrl-C never get to fire). So the
+    // flashes stream must never terminate: `pending()` when off, and chained with
+    // `pending()` so a dropped WS connection becomes "quiet" rather than "ended".
+    let pending_mode = flash_url.is_some();
+    let mut flashes: crate::live::base::flashblocks::FlashblockStream = match &flash_url {
+        Some(u) => {
+            use crate::live::base::flashblocks::{BaseFlashblocksSource, Flashblock, PreconfSource};
+            eprintln!("pending mode: flashblock cadence via {u}; confirming at `pending` tag");
+            let s = BaseFlashblocksSource::new(u.clone()).subscribe().await?;
+            Box::pin(s.chain(futures::stream::pending::<Flashblock>()))
+        }
+        None => Box::pin(futures::stream::pending()),
+    };
 
     let usdc = base_token;
     let mut total_potential = U256::ZERO;
@@ -343,11 +515,30 @@ pub async fn watch(
     // in-between). 0 = never.
     let mut resync = tokio::time::interval(std::time::Duration::from_secs(resync_secs.max(1)));
     resync.tick().await; // consume the immediate first tick
+    // Last pending-mode evaluation time (throttle); start in the past so the
+    // first flashblock evaluates immediately.
+    let mut last_eval = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+
+    // Gas price is refreshed on an interval, not per-eval (see `evaluate`).
+    let mut gas_price = provider.get_gas_price().await.map(U256::from).unwrap_or(U256::ZERO);
+    let mut gas_refresh = tokio::time::interval(std::time::Duration::from_secs(5));
+    gas_refresh.tick().await;
 
     'watch: loop {
         tokio::select! {
             _ = &mut ctrlc => { eprintln!("\n^C — stopping."); break 'watch; }
             _ = &mut deadline => { eprintln!("\nrun time elapsed — stopping."); break 'watch; }
+            // Refresh the cached gas price off the hot path. Bounded so a stalled
+            // RPC (free-tier rate-limit) can't freeze the loop / block shutdown.
+            _ = gas_refresh.tick() => {
+                let g = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    provider.get_gas_price(),
+                ).await;
+                if let Ok(Ok(g)) = g {
+                    gas_price = U256::from(g);
+                }
+            }
             // Apply pool events as they stream in (no per-block refetch).
             Some(log) = logs.next() => {
                 if let Some(lp) = reg.get_mut(&log.address()) {
@@ -355,113 +546,69 @@ pub async fn watch(
                 }
             }
             // Periodic full re-sync from chain (corrects any drift/missed logs).
+            // Whole block bounded so a rate-limited rebuild can't freeze the loop.
             _ = resync.tick(), if resync_secs > 0 => {
-                let rb = provider.get_block_number().await.unwrap_or(b);
-                for addr in &needed {
-                    if let Some(p) = info.get(addr) {
-                        if let Ok(Some(lp)) = build_live_pool(&provider, p, &decimals, rb, window).await {
-                            reg.insert(*addr, lp);
-                        }
-                    }
-                }
-                eprintln!("re-synced {} pools @ block {rb}", reg.len());
-            }
-            // On each new block: screen cycles in-memory (fast), then CONFIRM the
-            // candidates against on-chain quoters at this block before reporting.
-            Some(h) = heads.next() => {
-                blocks += 1;
-                let gas_price = provider.get_gas_price().await.map(U256::from).unwrap_or(U256::ZERO);
-                let ratio = weth.map(|w| eth_usdc_ratio(&reg, usdc, w)).unwrap_or(U256::ZERO);
-
-                // 1) cheap in-memory screen -> candidate cycle indices (+gas cost).
-                let mut cand: Vec<(U256, U256, usize)> = Vec::new(); // (sim_net, gas_cost, idx)
-                for (i, cyc) in cycles.iter().enumerate() {
-                    let legs_pools: Option<Vec<&LivePool>> =
-                        cyc.iter().map(|e| reg.get(&e.pool)).collect();
-                    let Some(pools) = legs_pools else { continue };
-                    let legs: Vec<Leg> = cyc
-                        .iter()
-                        .zip(pools.iter())
-                        .map(|(e, lp)| Leg { pool: *lp as &dyn Pool, token_in: e.from, token_out: e.to })
-                        .collect();
-                    if let Ok(r) = net_profit(&legs, amount_in, gas_price, ratio) {
-                        if let Some(net) = r.net_profit {
-                            if net >= min_profit {
-                                cand.push((net, r.gas_cost_in_token, i));
+                let resync_job = async {
+                    let rb = provider.get_block_number().await.unwrap_or(b);
+                    for addr in &needed {
+                        if let Some(p) = info.get(addr) {
+                            if let Ok(Some(lp)) = build_live_pool(&provider, p, &decimals, rb, window).await {
+                                reg.insert(*addr, lp);
                             }
                         }
                     }
+                    rb
+                };
+                match tokio::time::timeout(std::time::Duration::from_secs(60), resync_job).await {
+                    Ok(rb) => eprintln!("re-synced {} pools @ block {rb}", reg.len()),
+                    Err(_) => eprintln!("re-sync timed out (RPC stall) — keeping current state"),
                 }
-                if cand.is_empty() {
+            }
+            // Flashblock cadence (pending mode): evaluate against preconfirmed
+            // state (`pending` tag) ~every 200ms — arbs as they form.
+            Some(fb) = flashes.next() => {
+                use futures::FutureExt;
+                // Drain to the LATEST buffered flashblock — flashblocks arrive
+                // ~5/s; processing each would queue unboundedly and flood the
+                // `pending` RPC. We only care about the freshest preconf state.
+                let mut latest = fb;
+                while let Some(Some(f)) = flashes.next().now_or_never() {
+                    latest = f;
+                }
+                // Throttle confirmations to bound RPC load (each eval can issue
+                // many `pending` eth_calls); skip ticks inside the window.
+                if last_eval.elapsed() < std::time::Duration::from_millis(800) {
                     continue;
                 }
-                cand.sort_by(|a, b| b.0.cmp(&a.0));
-                cand.truncate(top.max(1) * 2); // bound confirmations
-
-                // 2) CONFIRM each candidate against the chain at THIS block
-                //    (consistent snapshot) — presence + exact values.
-                let bn = alloy::eips::BlockId::from(h.number);
-                let mut confirmed: Vec<(U256, Vec<Address>, Vec<Address>)> = Vec::new();
-                let mut screened_lines: Vec<String> = Vec::new();
-                for (sim_net, gas_cost, i) in &cand {
-                    let cyc = &cycles[*i];
-                    let toks: Vec<Address> =
-                        std::iter::once(cyc[0].from).chain(cyc.iter().map(|e| e.to)).collect();
-                    let pools: Vec<Address> = cyc.iter().map(|e| e.pool).collect();
-                    let cost = amount_in + *gas_cost;
-                    let chain_desc = match confirm_cycle(&provider, &info, cyc, amount_in, bn).await {
-                        Ok(Some(gross)) if gross > cost => {
-                            let net = gross - cost;
-                            if net >= min_profit {
-                                confirmed.push((net, pools.clone(), toks.clone()));
-                            }
-                            format!("chain +{}.{:06}", net / scale, net % scale)
-                        }
-                        Ok(Some(gross)) => {
-                            let d = cost - gross;
-                            format!("chain -{}.{:06} (not profitable)", d / scale, d % scale)
-                        }
-                        Ok(None) => "chain: reverts / not a real cycle".to_string(),
-                        Err(e) => format!("chain: error {e}"),
-                    };
-                    if show_screened {
-                        let path: Vec<String> = toks.iter().map(label).collect();
-                        screened_lines.push(format!(
-                            "  screened {} | screen +{}.{:06} | {} | pools={:?}",
-                            path.join("->"), sim_net / scale, sim_net % scale, chain_desc, pools
-                        ));
-                    }
+                last_eval = std::time::Instant::now();
+                let tag = format!("block {} fb#{}", latest.block, latest.index);
+                // Pending streaming runs ~every 800ms; cap confirmations hard so
+                // we don't flood the `pending` RPC into rate-limit/retry storms.
+                // Bound the whole eval so a silently-stalled RPC await (gas price,
+                // quoter call) can never freeze the watcher.
+                let ev = evaluate(
+                    &provider, &reg, &info, cycles, &sym, scale, amount_in, min_profit, top,
+                    top.clamp(1, 4), gas_price, weth, usdc, alloy::eips::BlockId::pending(), &tag,
+                    show_screened, &mut total_potential, &mut profitable_blocks,
+                );
+                if tokio::time::timeout(std::time::Duration::from_secs(10), ev).await.is_err() {
+                    eprintln!("[{tag}] eval timed out (RPC stall) — skipped");
                 }
-
-                // --show-screened: print every candidate + its on-chain result so
-                // you can SEE what looked profitable and why it was/wasn't real.
-                if show_screened {
-                    println!("[block {}] {} screened candidate(s):", h.number, cand.len());
-                    for l in &screened_lines {
-                        println!("{l}");
-                    }
-                }
-
-                if !confirmed.is_empty() {
-                    confirmed.sort_by(|a, b| b.0.cmp(&a.0));
-                    if !show_screened {
-                        println!(
-                            "[block {}] {} CONFIRMED arb(s) ({} screened):",
-                            h.number, confirmed.len(), cand.len()
-                        );
-                        for (net, pools, toks) in confirmed.iter().take(top) {
-                            let path: Vec<String> = toks.iter().map(label).collect();
-                            println!("  +{}.{:06} USDC | {} | pools={:?}", net / scale, net % scale, path.join("->"), pools);
-                        }
-                    }
-                    total_potential += confirmed[0].0;
-                    profitable_blocks += 1;
-                } else if !show_screened {
-                    // stderr diagnostic so default stdout stays clean.
-                    eprintln!(
-                        "[block {}] screened {} candidate(s) -> 0 confirmed on-chain",
-                        h.number, cand.len()
+            }
+            // On each new sealed block: count it. In sealed mode, evaluate +
+            // confirm at this block. In pending mode, flashblocks drive evaluation.
+            Some(h) = heads.next() => {
+                blocks += 1;
+                if !pending_mode {
+                    let tag = format!("block {}", h.number);
+                    let ev = evaluate(
+                        &provider, &reg, &info, cycles, &sym, scale, amount_in, min_profit, top,
+                        top.max(1) * 2, gas_price, weth, usdc, alloy::eips::BlockId::from(h.number), &tag,
+                        show_screened, &mut total_potential, &mut profitable_blocks,
                     );
+                    if tokio::time::timeout(std::time::Duration::from_secs(15), ev).await.is_err() {
+                        eprintln!("[{tag}] eval timed out (RPC stall) — skipped");
+                    }
                 }
             }
         }

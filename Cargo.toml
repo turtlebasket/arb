@@ -25,6 +25,10 @@ alloy = { version = "1.7", default-features = false, features = [
     "sol-types",
     "contract",
 ], optional = true }
+# Raw WS client (Flashblocks stream is a plain JSON push, not JSON-RPC) + JSON.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"], optional = true }
+serde_json = { version = "1", optional = true }
+brotli = { version = "7", optional = true } # Base Flashblocks stream is brotli-compressed
 
 [features]
-live-rpc = ["dep:alloy"]
+live-rpc = ["dep:alloy", "dep:tokio-tungstenite", "dep:serde_json", "dep:brotli"]

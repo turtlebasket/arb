@@ -40,6 +40,13 @@ enum Command {
     /// Watch live: print net-positive USDC→…→USDC arb opportunities each block.
     #[command(name = "watch-arb")]
     WatchArb(WatchArbArgs),
+    /// Probe the Base Flashblocks WS: dump the live message format (diagnostic).
+    #[command(name = "flashblocks-probe")]
+    FlashblocksProbe {
+        /// Number of messages to read.
+        #[arg(long, default_value_t = 6)]
+        n: usize,
+    },
 }
 
 #[derive(Args)]
@@ -72,6 +79,11 @@ struct WatchArbArgs {
     /// (shows what looked profitable + why it was/wasn't real).
     #[arg(long)]
     show_screened: bool,
+    /// Drive evaluation at Flashblock cadence (~200ms) and confirm against the
+    /// `pending` block tag (flashblock-preconfirmed state) — see arbs as they
+    /// form, before they're sealed. Requires a flashblocks-aware RPC.
+    #[arg(long)]
+    pending: bool,
 }
 
 #[derive(Args)]
@@ -232,12 +244,13 @@ fn main() {
             }
             verify_sync_command(chain, args.max_pools, args.lookback, args.window);
         }
+        Command::FlashblocksProbe { n } => flashblocks_probe_command(n),
         Command::WatchArb(args) => {
             let chain = arb::config::Chain::parse(&args.chain).unwrap_or_else(|e| fail(&e));
             if chain != arb::config::Chain::Base {
                 fail("watch-arb is currently Base-only");
             }
-            watch_arb_command(chain, args.amount, args.min_profit, args.max_hops, args.top, args.secs, args.window, args.resync_secs, args.show_screened);
+            watch_arb_command(chain, args.amount, args.min_profit, args.max_hops, args.top, args.secs, args.window, args.resync_secs, args.show_screened, args.pending);
         }
         Command::Simulate(args) => {
             let sel = args.chain.selection();
@@ -572,9 +585,10 @@ fn verify_command(chain: arb::config::Chain, max_pools: usize) {
 
 #[cfg(feature = "live-rpc")]
 #[allow(clippy::too_many_arguments)]
-fn watch_arb_command(chain: arb::config::Chain, amount: u64, min_profit: u64, max_hops: usize, top: usize, secs: u64, window: i32, resync_secs: u64, show_screened: bool) {
+fn watch_arb_command(chain: arb::config::Chain, amount: u64, min_profit: u64, max_hops: usize, top: usize, secs: u64, window: i32, resync_secs: u64, show_screened: bool, pending: bool) {
     use arb::book::{PoolBook, Tier};
     use arb::graph::Graph;
+    use arb::live::base::flashblocks::BaseFlashblocksSource;
     use arb::live::base::synced::watch;
     use arb::types::U256;
 
@@ -603,9 +617,33 @@ fn watch_arb_command(chain: arb::config::Chain, amount: u64, min_profit: u64, ma
         .build()
         .unwrap_or_else(|e| fail(&format!("tokio runtime: {e}")));
     let run_for = (secs > 0).then(|| std::time::Duration::from_secs(secs));
-    if let Err(e) = rt.block_on(watch(&url, &book, &cycles, usdc, weth, amount_in, min_profit, top, window, run_for, resync_secs, show_screened)) {
+    let flash_url = pending.then(|| {
+        std::env::var("BASE_FLASHBLOCKS_WSS_URL")
+            .unwrap_or_else(|_| BaseFlashblocksSource::DEFAULT_URL.to_string())
+    });
+    if let Err(e) = rt.block_on(watch(&url, &book, &cycles, usdc, weth, amount_in, min_profit, top, window, run_for, resync_secs, show_screened, flash_url)) {
         fail(&format!("watch error: {e}"));
     }
+}
+
+#[cfg(feature = "live-rpc")]
+fn flashblocks_probe_command(n: usize) {
+    use arb::live::base::flashblocks::{probe, BaseFlashblocksSource};
+    let url = std::env::var("BASE_FLASHBLOCKS_WSS_URL")
+        .unwrap_or_else(|_| BaseFlashblocksSource::DEFAULT_URL.to_string());
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|e| fail(&format!("tokio runtime: {e}")));
+    if let Err(e) = rt.block_on(probe(&url, n)) {
+        fail(&format!("flashblocks probe error: {e}"));
+    }
+}
+
+#[cfg(not(feature = "live-rpc"))]
+fn flashblocks_probe_command(_n: usize) {
+    eprintln!("flashblocks-probe requires --features live-rpc");
+    std::process::exit(1);
 }
 
 #[cfg(feature = "live-rpc")]
@@ -652,7 +690,7 @@ fn verify_sync_command(_chain: arb::config::Chain, _max_pools: usize, _lookback:
 
 #[cfg(not(feature = "live-rpc"))]
 #[allow(clippy::too_many_arguments)]
-fn watch_arb_command(_chain: arb::config::Chain, _amount: u64, _min_profit: u64, _max_hops: usize, _top: usize, _secs: u64, _window: i32, _resync_secs: u64, _show_screened: bool) {
+fn watch_arb_command(_chain: arb::config::Chain, _amount: u64, _min_profit: u64, _max_hops: usize, _top: usize, _secs: u64, _window: i32, _resync_secs: u64, _show_screened: bool, _pending: bool) {
     eprintln!("watch-arb requires the RPC backend: cargo run --features live-rpc -- watch-arb --chain base");
     std::process::exit(1);
 }

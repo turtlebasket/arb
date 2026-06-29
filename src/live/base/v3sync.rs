@@ -68,6 +68,11 @@ pub struct V3PoolState {
     /// `Some((lo,hi))` if the tick map is only complete within that range
     /// (Approach C windowed init); `None` = full-range data.
     pub window: Option<(i32, i32)>,
+    /// Lazily-built quotable snapshot, reused across quotes until the next
+    /// applied event invalidates it. Rebuilding per quote (cloning the whole
+    /// tick map) made the per-block screen O(pools × cycles × ticks) and could
+    /// stall the watcher for seconds; the cache makes it one build per change.
+    cache: std::cell::RefCell<Option<UniV3Pool>>,
 }
 
 impl V3PoolState {
@@ -97,6 +102,7 @@ impl V3PoolState {
             last_key: (block, u64::MAX), // block B fully reflected in snapshot
             snapshot_block: block,
             window: None,
+            cache: std::cell::RefCell::new(None),
         })
     }
 
@@ -132,6 +138,7 @@ impl V3PoolState {
             last_key: (block, u64::MAX),
             snapshot_block: block,
             window: Some((lo, hi)),
+            cache: std::cell::RefCell::new(None),
         })
     }
 
@@ -208,6 +215,7 @@ impl V3PoolState {
         };
         if applied {
             self.last_key = key;
+            *self.cache.get_mut() = None; // state changed -> rebuild on next quote
         }
         applied
     }
@@ -220,8 +228,9 @@ impl V3PoolState {
         }
     }
 
-    /// Build a quotable [`UniV3Pool`] snapshot from the current state.
-    pub fn as_pool(&self) -> UniV3Pool {
+    /// Build a quotable [`UniV3Pool`] snapshot from the current state (cold path
+    /// — clones the tick map). Prefer [`Self::quote`], which reuses a cache.
+    fn build_pool(&self) -> UniV3Pool {
         let ticks: Vec<TickData> = self
             .ticks
             .iter()
@@ -245,13 +254,31 @@ impl V3PoolState {
         }
     }
 
+    /// Populate the cache if empty (invalidated on each applied event).
+    fn ensure_cache(&self) {
+        if self.cache.borrow().is_none() {
+            *self.cache.borrow_mut() = Some(self.build_pool());
+        }
+    }
+
+    /// A quotable [`UniV3Pool`] snapshot of the current state.
+    pub fn as_pool(&self) -> UniV3Pool {
+        self.ensure_cache();
+        self.cache.borrow().clone().expect("cache populated")
+    }
+
     pub fn quote(
         &self,
         token_in: Address,
         token_out: Address,
         amount_in: U256,
     ) -> Result<U256, SimError> {
-        self.as_pool().quote(token_in, token_out, amount_in)
+        self.ensure_cache();
+        self.cache
+            .borrow()
+            .as_ref()
+            .expect("cache populated")
+            .quote(token_in, token_out, amount_in)
     }
 }
 
