@@ -61,72 +61,86 @@ impl SolidlyStablePool {
         }
     }
 
-    /// Normalize a raw amount of `dec`-decimal token to 1e18 fixed point.
-    fn norm(amount: U256, dec: u8) -> Option<U256> {
-        mul_div(amount, e18(), pow10(dec))
+    /// Solidity `(a * b) / 1e18` with a **256-bit** multiply: `None` (≡ revert) at
+    /// exactly the overflow point the on-chain contract hits. This faithful
+    /// overflow behavior is required for wei-exactness on degenerate pools — e.g.
+    /// a "stable" pool pairing tokens of very different value, where the invariant
+    /// `x3y+xy3` overflows uint256 and the real `getAmountOut` reverts. (Using a
+    /// 512-bit `mul_div` here would return a phantom value the chain can't.)
+    #[inline]
+    fn mul1e18(a: U256, b: U256) -> Option<U256> {
+        Some(a.checked_mul(b)? / e18())
     }
 
-    /// Denormalize a 1e18 fixed-point amount back to `dec`-decimal units.
-    fn denorm(amount: U256, dec: u8) -> Option<U256> {
-        mul_div(amount, pow10(dec), e18())
+    /// `_k`/`_f`: `x3y + xy3` on values normalized to 1e18, in the contract's
+    /// exact expression order: `a=(x*y)/1e18`, `b=(x*x)/1e18+(y*y)/1e18`,
+    /// `(a*b)/1e18`. (`_k` on raw reserves and `_f` on a candidate `y` are the
+    /// same expression on-chain.)
+    fn f(x: U256, y: U256) -> Option<U256> {
+        let a = Self::mul1e18(x, y)?;
+        let b = Self::mul1e18(x, x)?.checked_add(Self::mul1e18(y, y)?)?;
+        Self::mul1e18(a, b)
     }
 
-    /// k = x^3*y + x*y^3 with x,y normalized to 1e18.
-    fn k(x: U256, y: U256) -> Option<U256> {
-        let a = mul_div(x, y, e18())?; // xy / 1e18
-        let x2 = mul_div(x, x, e18())?;
-        let y2 = mul_div(y, y, e18())?;
-        let b = x2.checked_add(y2)?; // (x^2 + y^2)/1e18
-        mul_div(a, b, e18())
-    }
-
-    /// f(x0, y) = x0*y^3 + x0^3*y  (the invariant value at a candidate y).
-    fn f(x0: U256, y: U256) -> Option<U256> {
-        let y2 = mul_div(y, y, e18())?;
-        let y3 = mul_div(y2, y, e18())?;
-        let t1 = mul_div(x0, y3, e18())?;
-        let x2 = mul_div(x0, x0, e18())?;
-        let x3 = mul_div(x2, x0, e18())?;
-        let t2 = mul_div(x3, y, e18())?;
+    /// `_d = (3*x0*((y*y)/1e18))/1e18 + ((((x0*x0)/1e18)*x0)/1e18)`.
+    fn d(x0: U256, y: U256) -> Option<U256> {
+        let y2 = Self::mul1e18(y, y)?;
+        let t1 = U256::from(3u64).checked_mul(x0)?.checked_mul(y2)? / e18();
+        let x2 = Self::mul1e18(x0, x0)?;
+        let t2 = x2.checked_mul(x0)? / e18();
         t1.checked_add(t2)
     }
 
-    /// d/dy f = 3*x0*y^2 + x0^3.
-    fn d(x0: U256, y: U256) -> Option<U256> {
-        let y2 = mul_div(y, y, e18())?;
-        let three_x0 = x0.checked_mul(U256::from(3u64))?;
-        let t1 = mul_div(three_x0, y2, e18())?;
-        let x2 = mul_div(x0, x0, e18())?;
-        let x3 = mul_div(x2, x0, e18())?;
-        t1.checked_add(x3)
+    /// `_k` verbatim — re-scales BOTH args by `decimals0`/`decimals1` (the
+    /// contract does this even when called from `_get_y` with already-normalized
+    /// args; a quirk we must replicate for wei-exactness).
+    fn k_rescaled(&self, x: U256, y: U256) -> Option<U256> {
+        let _x = x.checked_mul(e18())? / pow10(self.decimals0);
+        let _y = y.checked_mul(e18())? / pow10(self.decimals1);
+        Self::f(_x, _y)
     }
 
-    /// Solve for the new reserve `y` given `x0` (new reserve in) and target `xy`.
-    fn get_y(x0: U256, xy: U256, mut y: U256) -> Option<U256> {
+    /// Verbatim port of the contract's `_get_y` Newton solve, including the exact
+    /// `dy == 0` handling (forces `dy = 1`, can oscillate) and the
+    /// **`revert("!y")` after 255 iterations** if it never converges. All
+    /// arithmetic is 256-bit checked so overflow/underflow/zero-division yield
+    /// `None` (≡ revert). On ill-conditioned pools (e.g. tokens of very different
+    /// value mis-paired as "stable") the integer root can't satisfy the return
+    /// conditions, so it oscillates to 255 and reverts — exactly like on-chain.
+    fn get_y(&self, x0: U256, xy: U256, mut y: U256) -> Option<U256> {
         let one = U256::from(1u64);
         for _ in 0..255 {
-            let y_prev = y;
             let k = Self::f(x0, y)?;
-            let dydx = Self::d(x0, y)?;
-            if dydx.is_zero() {
-                return None;
+            let dd = Self::d(x0, y)?;
+            if dd.is_zero() {
+                return None; // div by _d -> revert
             }
             if k < xy {
-                let dy = mul_div(xy - k, e18(), dydx)?;
-                y = y.checked_add(dy)?;
-            } else {
-                let dy = mul_div(k - xy, e18(), dydx)?;
-                y = y.checked_sub(dy)?;
-            }
-            if y > y_prev {
-                if y - y_prev <= one {
-                    return Some(y);
+                let dy = (xy - k).checked_mul(e18())? / dd;
+                if dy.is_zero() {
+                    if k == xy {
+                        return Some(y);
+                    }
+                    if self.k_rescaled(x0, y.checked_add(one)?)? > xy {
+                        return Some(y + one);
+                    }
+                    y = y.checked_add(one)?; // dy = 1
+                } else {
+                    y = y.checked_add(dy)?;
                 }
-            } else if y_prev - y <= one {
-                return Some(y);
+            } else {
+                let dy = (k - xy).checked_mul(e18())? / dd;
+                if dy.is_zero() {
+                    if k == xy || Self::f(x0, y.checked_sub(one)?)? < xy {
+                        return Some(y);
+                    }
+                    y = y.checked_sub(one)?; // dy = 1
+                } else {
+                    y = y.checked_sub(dy)?; // underflow -> None ≡ revert
+                }
             }
         }
-        Some(y)
+        None // contract: revert("!y") on non-convergence
     }
 }
 
@@ -158,38 +172,46 @@ impl Pool for SolidlyStablePool {
         if self.fee_bps >= 10_000 {
             return Err(SimError::BadConfig("fee_bps >= 100%"));
         }
-        let (dec_in, dec_out, raw_res_in, raw_res_out) = if token_in == self.token0
-            && token_out == self.token1
-        {
-            (self.decimals0, self.decimals1, self.reserve0, self.reserve1)
+        let from_token0 = if token_in == self.token0 && token_out == self.token1 {
+            true
         } else if token_in == self.token1 && token_out == self.token0 {
-            (self.decimals1, self.decimals0, self.reserve1, self.reserve0)
+            false
         } else if token_in != self.token0 && token_in != self.token1 {
             return Err(SimError::UnknownToken(token_in));
         } else {
             return Err(SimError::UnknownToken(token_out));
         };
-        if raw_res_in.is_zero() || raw_res_out.is_zero() {
+        if self.reserve0.is_zero() || self.reserve1.is_zero() {
             return Err(SimError::InsufficientLiquidity);
         }
+        let d0 = pow10(self.decimals0); // contract's `decimals0` = 10**dec
+        let d1 = pow10(self.decimals1);
 
-        // Apply fee on the input, then work in normalized (1e18) space.
+        // amountIn -= (amountIn * fee) / 10000   (matches `_getAmountOut`)
         let fee = mul_div(amount_in, U256::from(self.fee_bps), U256::from(10_000u64))
             .ok_or(SimError::Overflow)?;
-        let amount_in_after_fee = amount_in - fee;
+        let amount_in = amount_in - fee;
 
-        let res_in = Self::norm(raw_res_in, dec_in).ok_or(SimError::Overflow)?;
-        let res_out = Self::norm(raw_res_out, dec_out).ok_or(SimError::Overflow)?;
-        let amt_in = Self::norm(amount_in_after_fee, dec_in).ok_or(SimError::Overflow)?;
+        // xy = _k(reserve0, reserve1) on RAW reserves, scaled to 1e18 internally
+        // (token order, not in/out order — the invariant is symmetric).
+        let rx = self.reserve0.checked_mul(e18()).ok_or(SimError::Overflow)? / d0;
+        let ry = self.reserve1.checked_mul(e18()).ok_or(SimError::Overflow)? / d1;
+        let xy = Self::f(rx, ry).ok_or(SimError::Overflow)?;
 
-        let xy = Self::k(res_in, res_out).ok_or(SimError::Overflow)?;
-        let new_res_in = res_in.checked_add(amt_in).ok_or(SimError::Overflow)?;
-        let new_res_out = Self::get_y(new_res_in, xy, res_out).ok_or(SimError::Overflow)?;
-        let dy = res_out
-            .checked_sub(new_res_out)
-            .ok_or(SimError::InsufficientLiquidity)?;
+        let (reserve_a, reserve_b) = if from_token0 { (rx, ry) } else { (ry, rx) };
+        let amt_in = if from_token0 {
+            amount_in.checked_mul(e18()).ok_or(SimError::Overflow)? / d0
+        } else {
+            amount_in.checked_mul(e18()).ok_or(SimError::Overflow)? / d1
+        };
+        let x0 = amt_in.checked_add(reserve_a).ok_or(SimError::Overflow)?;
+        // get_y → None means the contract reverts (overflow/underflow/non-convergence).
+        let new_y = self.get_y(x0, xy, reserve_b).ok_or(SimError::Overflow)?;
+        let y = reserve_b.checked_sub(new_y).ok_or(SimError::InsufficientLiquidity)?;
 
-        Self::denorm(dy, dec_out).ok_or(SimError::Overflow)
+        // out = (y * decimals_out) / 1e18
+        let dec_out_factor = if from_token0 { d1 } else { d0 };
+        Ok(y.checked_mul(dec_out_factor).ok_or(SimError::Overflow)? / e18())
     }
 
     fn gas_estimate(&self) -> u64 {
@@ -250,5 +272,20 @@ mod tests {
         let lo = mul_div(expected, U256::from(998u64), U256::from(1000u64)).unwrap();
         let hi = mul_div(expected, U256::from(1002u64), U256::from(1000u64)).unwrap();
         assert!(out > lo && out < hi, "out={out} expected≈{expected}");
+    }
+
+    #[test]
+    fn degenerate_weth_usdc_stable_reverts_like_chain() {
+        // Real Base pool 0x3548… (WETH/USDC mis-paired as "stable") at block
+        // 47978632: reserves 4.354 WETH / 20434 USDC. On-chain getAmountOut for
+        // 0.01 WETH reverts (panic 0x11 overflow) — the Newton solve is
+        // ill-conditioned. The sim MUST also fail (return Err), not a phantom value.
+        let weth = addr(1);
+        let usdc = addr(2);
+        let r0 = U256::from_str_radix("3c6f3bb56ce6567f", 16).unwrap(); // WETH (18)
+        let r1 = U256::from_str_radix("4c1e205bb", 16).unwrap(); // USDC (6)
+        let pool = SolidlyStablePool::new(addr(9), weth, usdc, r0, r1, 18, 6, 5);
+        let out = pool.quote(weth, usdc, U256::from(10_000_000_000_000_000u64)); // 0.01 WETH
+        assert!(out.is_err(), "expected revert-equivalent Err, got {out:?}");
     }
 }
