@@ -54,7 +54,8 @@ struct WatchArbArgs {
     /// Chain to watch (currently base only).
     #[arg(long)]
     chain: String,
-    /// Probe trade size in whole base-token (USDC) units.
+    /// Max trade size (whole USDC units) — the per-cycle optimal size is searched
+    /// up to this cap, so this bounds capital deployed, not a fixed probe size.
     #[arg(long, default_value_t = 1000)]
     amount: u64,
     /// Only print cycles with net profit >= this many USDC base units (1e6 = 1 USDC).
@@ -622,7 +623,7 @@ fn watch_arb_command(chain: arb::config::Chain, amount: u64, min_profit: u64, ma
     let min_profit = U256::from(min_profit);
 
     println!(
-        "watch-arb: chain={chain_name} cycles={} amount={amount} USDC min_profit={min_profit} base-units (Ctrl-C to stop)",
+        "watch-arb: chain={chain_name} cycles={} max_size={amount} USDC (size optimized per-cycle) min_profit={min_profit} base-units (Ctrl-C to stop)",
         cycles.len()
     );
 

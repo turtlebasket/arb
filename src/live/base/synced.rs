@@ -28,7 +28,7 @@ use crate::live::base::status::{with_spinner, StatusLine};
 use crate::live::base::v3sync::{self, V3PoolState};
 use crate::live::base::verify::ground_truth;
 use crate::live::source::SourceError;
-use crate::path::{net_profit, Leg};
+use crate::path::{best_size, Leg};
 use crate::pool::{Pool, Protocol, SimError};
 use crate::types::{Address, U256};
 
@@ -299,12 +299,14 @@ async fn evaluate<P: Provider>(
     // select loop (the deadline/Ctrl-C arms can't run while we await inside one).
     let ratio = weth.map(|w| eth_usdc_ratio(reg, usdc, w)).unwrap_or(U256::ZERO);
 
-    // 1) cheap in-memory screen -> candidate cycle indices (+gas cost).
+    // 1) cheap in-memory screen. For each cycle, search the trade SIZE that
+    //    maximizes net profit (a fixed probe size sits in the dead zone — too big
+    //    for thin pools, irrelevant on deep ones). `amount_in` is the size CAP
+    //    (max capital); `scale` (1 base-token unit) is the marginal-probe floor.
     let dbg_screen = std::env::var("ARB_DEBUG_SCREEN").is_ok();
-    let (mut d_missing, mut d_err, mut d_ok, mut d_gross_pos) = (0usize, 0usize, 0usize, 0usize);
-    let (mut d_err_liq, mut d_err_ovf, mut d_err_other) = (0usize, 0usize, 0usize);
-    let mut d_best_edge: Option<(bool, U256)> = None; // (positive?, |gross-in|), max by signed edge
-    let mut cand: Vec<(U256, U256, usize)> = Vec::new(); // (sim_net, gas_cost, idx)
+    let (mut d_missing, mut d_latent, mut d_best_net) = (0usize, 0usize, U256::ZERO);
+    // (sim_net, gas_cost, amount, idx) — `amount` is this cycle's optimal size.
+    let mut cand: Vec<(U256, U256, U256, usize)> = Vec::new();
     for (i, cyc) in cycles.iter().enumerate() {
         let legs_pools: Option<Vec<&LivePool>> = cyc.iter().map(|e| reg.get(&e.pool)).collect();
         let Some(pools) = legs_pools else {
@@ -316,59 +318,27 @@ async fn evaluate<P: Provider>(
             .zip(pools.iter())
             .map(|(e, lp)| Leg { pool: *lp as &dyn Pool, token_in: e.from, token_out: e.to })
             .collect();
-        match net_profit(&legs, amount_in, gas_price, ratio) {
-            Ok(r) => {
-                d_ok += 1;
-                if dbg_screen {
-                    // Track the best (most positive / least negative) gross edge so
-                    // we can see how close the field gets to break-even pre-gas.
-                    let (pos, mag) = if r.gross_out >= amount_in {
-                        d_gross_pos += 1;
-                        (true, r.gross_out - amount_in)
-                    } else {
-                        (false, amount_in - r.gross_out)
-                    };
-                    let better = match d_best_edge {
-                        None => true,
-                        Some((bp, bm)) => match (pos, bp) {
-                            (true, false) => true,
-                            (false, true) => false,
-                            (true, true) => mag > bm,
-                            (false, false) => mag < bm,
-                        },
-                    };
-                    if better {
-                        d_best_edge = Some((pos, mag));
-                    }
+        // `Some` => a latent arb (effective rate > 1 at the optimum); `net_profit`
+        // tells us whether it also clears gas.
+        if let Some(s) = best_size(&legs, scale, amount_in, gas_price, ratio) {
+            d_latent += 1;
+            if let Some(net) = s.result.net_profit {
+                if net > d_best_net {
+                    d_best_net = net;
                 }
-                if let Some(net) = r.net_profit {
-                    if net >= min_profit {
-                        cand.push((net, r.gas_cost_in_token, i));
-                    }
-                }
-            }
-            Err(e) => {
-                d_err += 1;
-                if dbg_screen {
-                    let k = match e {
-                        SimError::InsufficientLiquidity => &mut d_err_liq,
-                        SimError::IncompleteState => &mut d_err_ovf, // reuse: "window" bucket
-                        _ => &mut d_err_other,
-                    };
-                    *k += 1;
+                if net >= min_profit {
+                    cand.push((net, s.result.gas_cost_in_token, s.amount_in, i));
                 }
             }
         }
     }
     if dbg_screen {
-        let edge = match d_best_edge {
-            Some((true, m)) => format!("+{}.{:06}", m / scale, m % scale),
-            Some((false, m)) => format!("-{}.{:06}", m / scale, m % scale),
-            None => "n/a".into(),
-        };
         status.note(&format!(
-            "[{tag}] screen: {} cycles | sim_ok {d_ok} | err {d_err} (liq {d_err_liq} / window {d_err_ovf} / other {d_err_other}) | missing_pool {d_missing} | gross_positive {d_gross_pos} | best_gross_edge {edge}",
-            cycles.len()
+            "[{tag}] screen: {} cycles | latent_arbs(rate>1) {d_latent} | actionable(after gas) {} | best_net {}.{:06} | missing_pool {d_missing}",
+            cycles.len(),
+            cand.len(),
+            d_best_net / scale,
+            d_best_net % scale,
         ));
     }
     if cand.is_empty() {
@@ -379,27 +349,28 @@ async fn evaluate<P: Provider>(
 
     // 2) CONFIRM each candidate against the chain at `confirm_at` (consistent
     //    snapshot) — presence + exact values.
-    let mut confirmed: Vec<(U256, Vec<Address>, Vec<Address>)> = Vec::new();
+    let mut confirmed: Vec<(U256, U256, Vec<Address>, Vec<Address>)> = Vec::new();
     let mut screened_lines: Vec<String> = Vec::new();
-    for (sim_net, gas_cost, i) in &cand {
+    for (sim_net, gas_cost, amount, i) in &cand {
         let cyc = &cycles[*i];
         let toks: Vec<Address> =
             std::iter::once(cyc[0].from).chain(cyc.iter().map(|e| e.to)).collect();
         let pools: Vec<Address> = cyc.iter().map(|e| e.pool).collect();
-        let cost = amount_in + *gas_cost;
+        let cost = *amount + *gas_cost;
+        // Confirm at the cycle's OWN optimal size (not a global fixed amount).
         // Bound each confirmation: a `pending`/sealed eth_call that never returns
         // (silent RPC stall — not an error, so retry/backoff won't fire) must not
         // block the watcher. On timeout we skip the cycle this tick.
         let confirm = tokio::time::timeout(
             std::time::Duration::from_secs(4),
-            confirm_cycle(provider, info, cyc, amount_in, confirm_at),
+            confirm_cycle(provider, info, cyc, *amount, confirm_at),
         )
         .await;
         let chain_desc = match confirm {
             Ok(Ok(Some(gross))) if gross > cost => {
                 let net = gross - cost;
                 if net >= min_profit {
-                    confirmed.push((net, pools.clone(), toks.clone()));
+                    confirmed.push((net, *amount, pools.clone(), toks.clone()));
                 }
                 format!("chain +{}.{:06}", net / scale, net % scale)
             }
@@ -414,8 +385,10 @@ async fn evaluate<P: Provider>(
         if show_screened {
             let path: Vec<String> = toks.iter().map(&label).collect();
             screened_lines.push(format!(
-                "  screened {} | screen +{}.{:06} | {} | pools={:?}",
+                "  screened {} | size {}.{:06} | screen +{}.{:06} | {} | pools={:?}",
                 path.join("->"),
+                amount / scale,
+                amount % scale,
                 sim_net / scale,
                 sim_net % scale,
                 chain_desc,
@@ -439,12 +412,14 @@ async fn evaluate<P: Provider>(
                 confirmed.len(),
                 cand.len()
             ));
-            for (net, pools, toks) in confirmed.iter().take(top) {
+            for (net, amount, pools, toks) in confirmed.iter().take(top) {
                 let path: Vec<String> = toks.iter().map(&label).collect();
                 status.log(&format!(
-                    "  +{}.{:06} USDC | {} | pools={:?}",
+                    "  +{}.{:06} USDC @ size {}.{:06} | {} | pools={:?}",
                     net / scale,
                     net % scale,
+                    amount / scale,
+                    amount % scale,
                     path.join("->"),
                     pools
                 ));
