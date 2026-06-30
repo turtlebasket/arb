@@ -24,6 +24,7 @@ use crate::book::{PoolBook, PoolInfo};
 use crate::graph::Edge;
 use crate::live::base::groundtruth::{v2_router, GtOutcome};
 use crate::live::base::loader::AERO_FACTORY;
+use crate::live::base::status::{with_spinner, StatusLine};
 use crate::live::base::v3sync::{self, V3PoolState};
 use crate::live::base::verify::ground_truth;
 use crate::live::source::SourceError;
@@ -288,6 +289,7 @@ async fn evaluate<P: Provider>(
     confirm_at: alloy::eips::BlockId,
     tag: &str,
     show_screened: bool,
+    status: &StatusLine,
     total_potential: &mut U256,
     profitable_blocks: &mut u64,
 ) -> Result<(), SourceError> {
@@ -298,22 +300,76 @@ async fn evaluate<P: Provider>(
     let ratio = weth.map(|w| eth_usdc_ratio(reg, usdc, w)).unwrap_or(U256::ZERO);
 
     // 1) cheap in-memory screen -> candidate cycle indices (+gas cost).
+    let dbg_screen = std::env::var("ARB_DEBUG_SCREEN").is_ok();
+    let (mut d_missing, mut d_err, mut d_ok, mut d_gross_pos) = (0usize, 0usize, 0usize, 0usize);
+    let (mut d_err_liq, mut d_err_ovf, mut d_err_other) = (0usize, 0usize, 0usize);
+    let mut d_best_edge: Option<(bool, U256)> = None; // (positive?, |gross-in|), max by signed edge
     let mut cand: Vec<(U256, U256, usize)> = Vec::new(); // (sim_net, gas_cost, idx)
     for (i, cyc) in cycles.iter().enumerate() {
         let legs_pools: Option<Vec<&LivePool>> = cyc.iter().map(|e| reg.get(&e.pool)).collect();
-        let Some(pools) = legs_pools else { continue };
+        let Some(pools) = legs_pools else {
+            d_missing += 1;
+            continue;
+        };
         let legs: Vec<Leg> = cyc
             .iter()
             .zip(pools.iter())
             .map(|(e, lp)| Leg { pool: *lp as &dyn Pool, token_in: e.from, token_out: e.to })
             .collect();
-        if let Ok(r) = net_profit(&legs, amount_in, gas_price, ratio) {
-            if let Some(net) = r.net_profit {
-                if net >= min_profit {
-                    cand.push((net, r.gas_cost_in_token, i));
+        match net_profit(&legs, amount_in, gas_price, ratio) {
+            Ok(r) => {
+                d_ok += 1;
+                if dbg_screen {
+                    // Track the best (most positive / least negative) gross edge so
+                    // we can see how close the field gets to break-even pre-gas.
+                    let (pos, mag) = if r.gross_out >= amount_in {
+                        d_gross_pos += 1;
+                        (true, r.gross_out - amount_in)
+                    } else {
+                        (false, amount_in - r.gross_out)
+                    };
+                    let better = match d_best_edge {
+                        None => true,
+                        Some((bp, bm)) => match (pos, bp) {
+                            (true, false) => true,
+                            (false, true) => false,
+                            (true, true) => mag > bm,
+                            (false, false) => mag < bm,
+                        },
+                    };
+                    if better {
+                        d_best_edge = Some((pos, mag));
+                    }
+                }
+                if let Some(net) = r.net_profit {
+                    if net >= min_profit {
+                        cand.push((net, r.gas_cost_in_token, i));
+                    }
+                }
+            }
+            Err(e) => {
+                d_err += 1;
+                if dbg_screen {
+                    let k = match e {
+                        SimError::InsufficientLiquidity => &mut d_err_liq,
+                        SimError::IncompleteState => &mut d_err_ovf, // reuse: "window" bucket
+                        _ => &mut d_err_other,
+                    };
+                    *k += 1;
                 }
             }
         }
+    }
+    if dbg_screen {
+        let edge = match d_best_edge {
+            Some((true, m)) => format!("+{}.{:06}", m / scale, m % scale),
+            Some((false, m)) => format!("-{}.{:06}", m / scale, m % scale),
+            None => "n/a".into(),
+        };
+        status.note(&format!(
+            "[{tag}] screen: {} cycles | sim_ok {d_ok} | err {d_err} (liq {d_err_liq} / window {d_err_ovf} / other {d_err_other}) | missing_pool {d_missing} | gross_positive {d_gross_pos} | best_gross_edge {edge}",
+            cycles.len()
+        ));
     }
     if cand.is_empty() {
         return Ok(());
@@ -369,31 +425,35 @@ async fn evaluate<P: Provider>(
     }
 
     if show_screened {
-        println!("[{tag}] {} screened candidate(s):", cand.len());
+        status.log(&format!("[{tag}] {} screened candidate(s):", cand.len()));
         for l in &screened_lines {
-            println!("{l}");
+            status.log(l);
         }
     }
 
     if !confirmed.is_empty() {
         confirmed.sort_by(|a, b| b.0.cmp(&a.0));
         if !show_screened {
-            println!("[{tag}] {} CONFIRMED arb(s) ({} screened):", confirmed.len(), cand.len());
+            status.log(&format!(
+                "[{tag}] {} CONFIRMED arb(s) ({} screened):",
+                confirmed.len(),
+                cand.len()
+            ));
             for (net, pools, toks) in confirmed.iter().take(top) {
                 let path: Vec<String> = toks.iter().map(&label).collect();
-                println!(
+                status.log(&format!(
                     "  +{}.{:06} USDC | {} | pools={:?}",
                     net / scale,
                     net % scale,
                     path.join("->"),
                     pools
-                );
+                ));
             }
         }
         *total_potential += confirmed[0].0;
         *profitable_blocks += 1;
     } else if !show_screened {
-        eprintln!("[{tag}] screened {} candidate(s) -> 0 confirmed on-chain", cand.len());
+        status.note(&format!("[{tag}] screened {} candidate(s) -> 0 confirmed on-chain", cand.len()));
     }
     Ok(())
 }
@@ -447,11 +507,15 @@ pub async fn watch(
     // (bounded) — sequential init of dozens of windowed V3 pools is RPC-bound and
     // slow on rate-limited tiers; bounded concurrency cuts it ~N× while staying
     // under provider limits (RetryBackoffLayer self-throttles any 429s).
+    let status = StatusLine::new();
     let b = provider.get_block_number().await.map_err(rpc)?;
-    eprintln!("synced watch: initializing {} pools @ block {b} (window={window})...", needed.len());
+    status.note(&format!(
+        "synced watch: initializing {} pools @ block {b} (window={window})...",
+        needed.len()
+    ));
     let init_t0 = std::time::Instant::now();
     let mut reg: HashMap<Address, LivePool> = HashMap::new();
-    let built: Vec<(Address, Result<Option<LivePool>, SourceError>)> = futures::stream::iter(
+    let init_job = futures::stream::iter(
         needed.iter().filter_map(|addr| info.get(addr).map(|p| (*addr, *p))),
     )
     .map(|(addr, p)| {
@@ -460,22 +524,23 @@ pub async fn watch(
         async move { (addr, build_live_pool(provider, p, decimals, b, window).await) }
     })
     .buffer_unordered(8)
-    .collect()
-    .await;
+    .collect::<Vec<(Address, Result<Option<LivePool>, SourceError>)>>();
+    let built = with_spinner(&status, "initializing pools", init_job).await;
     for (addr, res) in built {
         match res {
             Ok(Some(lp)) => {
                 reg.insert(addr, lp);
             }
             Ok(None) => {}
-            Err(e) => eprintln!("  init {addr} failed: {e}"),
+            Err(e) => status.note(&format!("  init {addr} failed: {e}")),
         }
     }
-    eprintln!(
+    status.set_blocks(0);
+    status.note(&format!(
         "synced watch: {} pools live in {:.1}s; streaming (Ctrl-C to stop)...",
         reg.len(),
         init_t0.elapsed().as_secs_f64()
-    );
+    ));
 
     // Flashblock cadence (pending mode). When set, evaluation is driven by
     // preconfirmations and confirmed against the `pending` tag; otherwise this is
@@ -489,7 +554,7 @@ pub async fn watch(
     let mut flashes: crate::live::base::flashblocks::FlashblockStream = match &flash_url {
         Some(u) => {
             use crate::live::base::flashblocks::{BaseFlashblocksSource, Flashblock, PreconfSource};
-            eprintln!("pending mode: flashblock cadence via {u}; confirming at `pending` tag");
+            status.note(&format!("pending mode: flashblock cadence via {u}; confirming at `pending` tag"));
             let s = BaseFlashblocksSource::new(u.clone()).subscribe().await?;
             Box::pin(s.chain(futures::stream::pending::<Flashblock>()))
         }
@@ -526,8 +591,8 @@ pub async fn watch(
 
     'watch: loop {
         tokio::select! {
-            _ = &mut ctrlc => { eprintln!("\n^C — stopping."); break 'watch; }
-            _ = &mut deadline => { eprintln!("\nrun time elapsed — stopping."); break 'watch; }
+            _ = &mut ctrlc => { status.finish(); eprintln!("\n^C — stopping."); break 'watch; }
+            _ = &mut deadline => { status.finish(); eprintln!("\nrun time elapsed — stopping."); break 'watch; }
             // Refresh the cached gas price off the hot path. Bounded so a stalled
             // RPC (free-tier rate-limit) can't freeze the loop / block shutdown.
             _ = gas_refresh.tick() => {
@@ -559,9 +624,10 @@ pub async fn watch(
                     }
                     rb
                 };
-                match tokio::time::timeout(std::time::Duration::from_secs(60), resync_job).await {
-                    Ok(rb) => eprintln!("re-synced {} pools @ block {rb}", reg.len()),
-                    Err(_) => eprintln!("re-sync timed out (RPC stall) — keeping current state"),
+                let resync_bounded = tokio::time::timeout(std::time::Duration::from_secs(60), resync_job);
+                match with_spinner(&status, "re-syncing pools", resync_bounded).await {
+                    Ok(rb) => status.note(&format!("re-synced {} pools @ block {rb}", reg.len())),
+                    Err(_) => status.note("re-sync timed out (RPC stall) — keeping current state"),
                 }
             }
             // Flashblock cadence (pending mode): evaluate against preconfirmed
@@ -589,26 +655,31 @@ pub async fn watch(
                 let ev = evaluate(
                     &provider, &reg, &info, cycles, &sym, scale, amount_in, min_profit, top,
                     top.clamp(1, 4), gas_price, weth, usdc, alloy::eips::BlockId::pending(), &tag,
-                    show_screened, &mut total_potential, &mut profitable_blocks,
+                    show_screened, &status, &mut total_potential, &mut profitable_blocks,
                 );
-                if tokio::time::timeout(std::time::Duration::from_secs(10), ev).await.is_err() {
-                    eprintln!("[{tag}] eval timed out (RPC stall) — skipped");
+                let ev = tokio::time::timeout(std::time::Duration::from_secs(10), ev);
+                if with_spinner(&status, "scanning (pending)", ev).await.is_err() {
+                    status.note(&format!("[{tag}] eval timed out (RPC stall) — skipped"));
                 }
+                status.set_confirmed(profitable_blocks);
             }
             // On each new sealed block: count it. In sealed mode, evaluate +
             // confirm at this block. In pending mode, flashblocks drive evaluation.
             Some(h) = heads.next() => {
                 blocks += 1;
+                status.set_blocks(blocks);
                 if !pending_mode {
                     let tag = format!("block {}", h.number);
                     let ev = evaluate(
                         &provider, &reg, &info, cycles, &sym, scale, amount_in, min_profit, top,
                         top.max(1) * 2, gas_price, weth, usdc, alloy::eips::BlockId::from(h.number), &tag,
-                        show_screened, &mut total_potential, &mut profitable_blocks,
+                        show_screened, &status, &mut total_potential, &mut profitable_blocks,
                     );
-                    if tokio::time::timeout(std::time::Duration::from_secs(15), ev).await.is_err() {
-                        eprintln!("[{tag}] eval timed out (RPC stall) — skipped");
+                    let ev = tokio::time::timeout(std::time::Duration::from_secs(15), ev);
+                    if with_spinner(&status, "scanning block", ev).await.is_err() {
+                        status.note(&format!("[{tag}] eval timed out (RPC stall) — skipped"));
                     }
+                    status.set_confirmed(profitable_blocks);
                 }
             }
         }

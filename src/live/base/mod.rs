@@ -41,6 +41,10 @@ pub mod v3state;
 #[cfg(feature = "live-rpc")]
 pub mod v3sync;
 
+/// Sticky bottom status bar (block counter + activity spinner) for the watcher.
+#[cfg(feature = "live-rpc")]
+pub mod status;
+
 /// Synced live registry + watcher (~0 RPC/block) (network-bound).
 #[cfg(feature = "live-rpc")]
 pub mod synced;
