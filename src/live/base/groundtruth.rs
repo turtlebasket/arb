@@ -29,6 +29,26 @@ sol! {
             external returns (uint256 amountOut, uint160 a, uint32 b, uint256 c);
     }
 
+    // Aerodrome Slipstream QuoterV2: identical to Uniswap's except the pool key is
+    // `int24 tickSpacing` (positioned after amountIn) rather than `uint24 fee`.
+    #[sol(rpc)]
+    interface ISlipstreamQuoter {
+        struct QuoteExactInputSingleParams {
+            address tokenIn;
+            address tokenOut;
+            uint256 amountIn;
+            int24   tickSpacing;
+            uint160 sqrtPriceLimitX96;
+        }
+        function quoteExactInputSingle(QuoteExactInputSingleParams params)
+            external returns (uint256 amountOut, uint160 a, uint32 b, uint256 c);
+    }
+
+    #[sol(rpc)]
+    interface ISlipstreamPool {
+        function tickSpacing() external view returns (int24);
+    }
+
     #[sol(rpc)]
     interface IUniV2Router {
         function getAmountsOut(uint256 amountIn, address[] path)
@@ -44,6 +64,7 @@ sol! {
 // --- Base mainnet addresses (Basescan-verified) ---
 pub const UNISWAP_QUOTER_V2: Address = address!("3d4e44Eb1374240CE5F1B871ab261CD16335B76a");
 pub const PANCAKE_QUOTER_V2: Address = address!("B048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997");
+pub const SLIPSTREAM_QUOTER: Address = address!("254cf9E1E6e233aa1AC962CB9B05b2cfeAaE15b0");
 pub const UNI_V2_ROUTER: Address = address!("4752ba5DBc23f44D87826276BF6Fd6b1C372aD24");
 pub const PANCAKE_V2_ROUTER: Address = address!("8cFe327CEc66d1C090Dd72bd0FF11d690C33a2Eb");
 
@@ -99,6 +120,43 @@ pub async fn quote_v3<P: Provider>(
         Ok(r) => Ok(GtOutcome::Out(r.amountOut)),
         Err(e) => {
             // A contract revert is an expected "no quote"; surface other errors.
+            if is_revert(&e) {
+                Ok(GtOutcome::Revert)
+            } else {
+                Err(rpc(e))
+            }
+        }
+    }
+}
+
+/// Aerodrome Slipstream ground truth via its QuoterV2 (int24 tickSpacing ABI).
+/// Reads the pool's `tickSpacing` (its pool key), then quotes exact-in. Reverts
+/// map to `Revert`.
+pub async fn quote_slipstream<P: Provider>(
+    provider: &P,
+    pool: Address,
+    token_in: Address,
+    token_out: Address,
+    amount_in: U256,
+    block: BlockId,
+) -> Result<GtOutcome, SourceError> {
+    let ts = ISlipstreamPool::new(pool, provider)
+        .tickSpacing()
+        .block(block)
+        .call()
+        .await
+        .map_err(rpc)?;
+    let q = ISlipstreamQuoter::new(SLIPSTREAM_QUOTER, provider);
+    let params = ISlipstreamQuoter::QuoteExactInputSingleParams {
+        tokenIn: token_in,
+        tokenOut: token_out,
+        amountIn: amount_in,
+        tickSpacing: ts,
+        sqrtPriceLimitX96: U160::ZERO,
+    };
+    match q.quoteExactInputSingle(params).block(block).call().await {
+        Ok(r) => Ok(GtOutcome::Out(r.amountOut)),
+        Err(e) => {
             if is_revert(&e) {
                 Ok(GtOutcome::Revert)
             } else {

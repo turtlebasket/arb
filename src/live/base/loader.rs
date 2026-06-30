@@ -49,6 +49,21 @@ fn rpc<E: std::fmt::Display>(e: E) -> SourceError {
     SourceError::Rpc(e.to_string())
 }
 
+/// Read a V3 pool's current `fee()` (pips) at `block`. Used for dynamic-fee forks
+/// (Slipstream) where the static book value goes stale.
+async fn fetch_v3_fee<P: Provider>(provider: &P, pool: Address, block: BlockId) -> Option<u32> {
+    use alloy::primitives::{Bytes, TxKind};
+    use alloy::rpc::types::{TransactionInput, TransactionRequest};
+    let tx = TransactionRequest {
+        to: Some(TxKind::Call(pool)),
+        input: TransactionInput::new(Bytes::from(vec![0xdd, 0xca, 0x3f, 0x43])), // fee()
+        ..Default::default()
+    };
+    let out = provider.call(tx).block(block).await.ok()?;
+    let b = out.as_ref();
+    (b.len() >= 32).then(|| u32::from_be_bytes([b[28], b[29], b[30], b[31]]))
+}
+
 /// Build the exact simulator for a pool from its on-chain state at `block`.
 /// Returns `Ok(None)` for unsupported pools or dead/illiquid state.
 pub async fn load_sim<P: Provider>(
@@ -68,12 +83,21 @@ pub async fn load_sim<P: Provider>(
         if snap.liquidity == 0 || snap.sqrt_price_x96.is_zero() {
             return Ok(None);
         }
+        // Aerodrome Slipstream uses a DYNAMIC fee module, so the swap fee changes
+        // per block and the cached book value goes stale. Read fee() at the pinned
+        // block so the sim matches the quoter to the wei. (Uniswap/Pancake fees are
+        // immutable, so the book value is fine and we skip the extra call.)
+        let fee = if p.exchange == "aerodrome-slipstream" {
+            fetch_v3_fee(provider, p.address, block).await.or(p.fee_bps).unwrap_or(0)
+        } else {
+            p.fee_bps.unwrap_or(0)
+        };
         let ticks = v3state::fetch_ticks(provider, p.address, snap.tick_spacing, block).await?;
         return Ok(Some(Box::new(UniV3Pool::new(
             p.address,
             p.token0,
             p.token1,
-            p.fee_bps.unwrap_or(0),
+            fee,
             snap.sqrt_price_x96,
             snap.liquidity,
             snap.tick,

@@ -674,8 +674,16 @@ fn verify_command(chain: arb::config::Chain, max_pools: usize) {
     let chain_name = chain.to_string();
     let url = std::env::var(chain.rpc_env_var())
         .unwrap_or_else(|_| fail(&format!("set ${} to your Alchemy Base WS endpoint", chain.rpc_env_var())));
-    let book = PoolBook::load(PoolBook::path_for_chain(&chain_name, Tier::Official))
+    let mut book = PoolBook::load(PoolBook::path_for_chain(&chain_name, Tier::Official))
         .unwrap_or_else(|e| fail(&format!("load official book: {e}")));
+    // Merge the secondary tier too, so activity-indexed pools (incl. slipstream)
+    // are covered by verification.
+    if let Ok(secondary) = PoolBook::load_or_new(&chain_name, Tier::Secondary) {
+        if !secondary.pools.is_empty() {
+            let (_t, p) = book.merge(&secondary);
+            println!("verify: merged {p} secondary pools");
+        }
+    }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

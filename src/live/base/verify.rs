@@ -76,6 +76,12 @@ pub async fn ground_truth<P: Provider>(
     block: BlockId,
 ) -> Result<Option<GtOutcome>, SourceError> {
     if p.kind == "uniswap_v3" {
+        if p.exchange == "aerodrome-slipstream" {
+            return Ok(Some(
+                groundtruth::quote_slipstream(provider, p.address, token_in, token_out, amount_in, block)
+                    .await?,
+            ));
+        }
         if let Some(q) = groundtruth::v3_quoter(&p.exchange) {
             let fee = p.fee_bps.unwrap_or(0);
             return Ok(Some(
@@ -240,16 +246,22 @@ pub async fn verify_all(
         book.tokens.values().map(|t| (t.address, t.decimals)).collect();
 
     let mut report = VerifyReport { block: b, ..Default::default() };
-    let (mut n_v3, mut n_v2, mut n_aero) = (0usize, 0usize, 0usize);
+    let (mut n_v3, mut n_v2, mut n_aero, mut n_slip) = (0usize, 0usize, 0usize, 0usize);
 
     for p in &book.pools {
         let family_full = if p.kind == "uniswap_v3" {
-            if groundtruth::v3_quoter(&p.exchange).is_none() {
+            if p.exchange == "aerodrome-slipstream" {
+                // Slipstream is a confirmable V3 family with its own quoter.
+                let f = n_slip >= max_per_family;
+                n_slip += if f { 0 } else { 1 };
+                f
+            } else if groundtruth::v3_quoter(&p.exchange).is_none() {
                 continue;
+            } else {
+                let f = n_v3 >= max_per_family;
+                n_v3 += if f { 0 } else { 1 };
+                f
             }
-            let f = n_v3 >= max_per_family;
-            n_v3 += if f { 0 } else { 1 };
-            f
         } else if p.exchange == "aerodrome" {
             let f = n_aero >= max_per_family;
             n_aero += if f { 0 } else { 1 };

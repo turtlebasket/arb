@@ -205,7 +205,7 @@ pub async fn discover_active_pools<P: Provider>(
         };
         // Only index pools we can confirm wei-exact on-chain.
         let (kind, fee_bps) = match exch.name.as_str() {
-            "uniswap-v3" | "pancakeswap-v3" => {
+            "uniswap-v3" | "pancakeswap-v3" | "aerodrome-slipstream" => {
                 let fee = call_word(provider, pool, fee_sel)
                     .await
                     .map(|w| u32::from_be_bytes([w[28], w[29], w[30], w[31]]));
