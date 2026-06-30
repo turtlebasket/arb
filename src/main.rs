@@ -40,6 +40,10 @@ enum Command {
     /// Watch live: print net-positive USDC→…→USDC arb opportunities each block.
     #[command(name = "watch-arb")]
     WatchArb(WatchArbArgs),
+    /// Find arbs over an explicit pool set at one block (builds exact sims; any
+    /// V3 DEX incl. slipstream/forks). Reports size-optimal profitable cycles.
+    #[command(name = "find-arb")]
+    FindArb(FindArbArgs),
     /// Probe the Base Flashblocks WS: dump the live message format (diagnostic).
     #[command(name = "flashblocks-probe")]
     FlashblocksProbe {
@@ -95,6 +99,28 @@ struct VerifyArgs {
     /// Max pools to check per family (bounds RPC usage).
     #[arg(long, default_value_t = 5)]
     max_pools: usize,
+}
+
+#[derive(Args, Debug)]
+struct FindArbArgs {
+    /// Chain (currently base only).
+    #[arg(long)]
+    chain: String,
+    /// Comma-separated pool addresses to consider (auto-classified on-chain).
+    #[arg(long, value_delimiter = ',')]
+    pools: Vec<String>,
+    /// Block to evaluate at (default: latest sealed).
+    #[arg(long)]
+    block: Option<u64>,
+    /// Max hops in a cycle.
+    #[arg(long, default_value_t = 3)]
+    max_hops: usize,
+    /// Max trade size (whole base-token units) the per-cycle optimizer may use.
+    #[arg(long, default_value_t = 100)]
+    amount: u64,
+    /// Base token symbol to start/end cycles at.
+    #[arg(long, default_value = "USDC")]
+    base: String,
 }
 
 #[derive(Args)]
@@ -257,6 +283,13 @@ fn main() {
                 fail("watch-arb is currently Base-only");
             }
             watch_arb_command(chain, args.amount, args.min_profit, args.max_hops, args.top, args.secs, args.window, args.resync_secs, args.show_screened, args.pending);
+        }
+        Command::FindArb(args) => {
+            let chain = arb::config::Chain::parse(&args.chain).unwrap_or_else(|e| fail(&e));
+            if chain != arb::config::Chain::Base {
+                fail("find-arb is currently Base-only");
+            }
+            find_arb_command(chain, args.pools, args.block, args.max_hops, args.amount, args.base);
         }
         Command::Simulate(args) => {
             let sel = args.chain.selection();
@@ -734,6 +767,249 @@ fn watch_arb_command(chain: arb::config::Chain, amount: u64, min_profit: u64, ma
     }
 }
 
+/// Find arbs over an explicit pool set at a single block. Builds EXACT sims from
+/// on-chain state at that block (any V3 DEX incl. aerodrome-slipstream and V3
+/// forks go through the same wei-exact tick math), then runs the size-optimized
+/// cycle search. Because every sim is built at the SAME block, the result is a
+/// consistent-snapshot confirmation — a profitable cycle is a real arb at that
+/// block's state. Used to reproduce/validate arbs deterministically.
+#[cfg(feature = "live-rpc")]
+fn find_arb_command(
+    chain: arb::config::Chain,
+    pool_strs: Vec<String>,
+    block: Option<u64>,
+    max_hops: usize,
+    amount: u64,
+    base_sym: String,
+) {
+    use alloy::eips::BlockId;
+    use alloy::providers::Provider;
+    use arb::book::{PoolBook, PoolInfo, Tier};
+    use arb::graph::Graph;
+    use arb::live::base::loader::load_sim;
+    use arb::path::{best_size, Leg};
+    use arb::pool::Pool;
+    use arb::types::{Address, U256};
+    use std::collections::HashMap;
+    use std::str::FromStr;
+
+    let chain_name = chain.to_string();
+    let url = std::env::var(chain.rpc_env_var())
+        .unwrap_or_else(|_| fail(&format!("set ${}", chain.rpc_env_var())));
+    let book = PoolBook::load(PoolBook::path_for_chain(&chain_name, Tier::Official))
+        .unwrap_or_else(|e| fail(&format!("load official book: {e}")));
+    let base = book
+        .tokens
+        .get(&base_sym)
+        .unwrap_or_else(|| fail(&format!("base token {base_sym} not in official book")))
+        .address;
+    let base_dec = book.tokens.values().find(|t| t.address == base).map(|t| t.decimals).unwrap_or(6);
+    let scale = U256::from(10u64).pow(U256::from(base_dec as u64));
+    let pools: Vec<Address> = pool_strs
+        .iter()
+        .map(|s| Address::from_str(s.trim()).unwrap_or_else(|_| fail(&format!("bad pool addr {s}"))))
+        .collect();
+    if pools.is_empty() {
+        fail("provide --pools <addr,addr,...>");
+    }
+
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let result = rt.block_on(async {
+        let provider = arb::live::base::rpc::connect(&url).await.map_err(|e| e.to_string())?;
+        let bn = match block {
+            Some(b) => b,
+            None => provider.get_block_number().await.map_err(|e| e.to_string())?.saturating_sub(1),
+        };
+        let bid = BlockId::from(bn);
+        println!("find-arb: classifying {} pools at block {bn}...", pools.len());
+
+        // Classify each pool on-chain (no factory list needed) into a PoolInfo.
+        let mut infos: Vec<PoolInfo> = Vec::new();
+        let mut tok_addrs: Vec<Address> = Vec::new();
+        for p in &pools {
+            let info = classify_pool(&provider, *p, bid).await;
+            match info {
+                Some(i) => {
+                    tok_addrs.push(i.token0);
+                    tok_addrs.push(i.token1);
+                    println!("  {p} -> {} ({}) {}/{}", i.exchange, i.kind, i.token0, i.token1);
+                    infos.push(i);
+                }
+                None => println!("  {p} -> UNCLASSIFIABLE (skipped)"),
+            }
+        }
+        // Resolve decimals for every token (V3 ignores them; solidly needs them).
+        tok_addrs.sort();
+        tok_addrs.dedup();
+        let mut decimals: HashMap<Address, u8> = book.tokens.values().map(|t| (t.address, t.decimals)).collect();
+        for a in &tok_addrs {
+            if !decimals.contains_key(a) {
+                if let Some(d) = fetch_decimals(&provider, *a, bid).await {
+                    decimals.insert(*a, d);
+                }
+            }
+        }
+        // Build exact sims at the block.
+        let mut sims: HashMap<Address, Box<dyn Pool>> = HashMap::new();
+        for i in &infos {
+            match load_sim(&provider, i, &decimals, bid).await {
+                Ok(Some(s)) => {
+                    sims.insert(i.address, s);
+                }
+                Ok(None) => println!("  sim {} -> dead/unsupported", i.address),
+                Err(e) => println!("  sim {} -> err {e}", i.address),
+            }
+        }
+        Ok::<_, String>((bn, infos, sims))
+    });
+    let (bn, infos, sims) = match result {
+        Ok(v) => v,
+        Err(e) => fail(&format!("find-arb error: {e}")),
+    };
+
+    // Temp book -> graph -> cycles from the base token.
+    let mut tb = PoolBook::empty(&chain_name);
+    tb.pools = infos;
+    let graph = Graph::from_book(&tb);
+    let cycles = graph.cycles(base, max_hops);
+    println!("find-arb: {} sims built; {} cycles through {base_sym}; cap {amount} {base_sym}", sims.len(), cycles.len());
+
+    let cap = U256::from(amount) * scale;
+    let mut found = 0;
+    for cyc in &cycles {
+        let legs_pools: Option<Vec<&Box<dyn Pool>>> = cyc.iter().map(|e| sims.get(&e.pool)).collect();
+        let Some(lp) = legs_pools else { continue };
+        let legs: Vec<Leg> = cyc
+            .iter()
+            .zip(lp.iter())
+            .map(|(e, p)| Leg { pool: p.as_ref(), token_in: e.from, token_out: e.to })
+            .collect();
+        // gas_price 0 / ratio 0: report GROSS size-optimal profit (gas on Base is
+        // ~0; this is the "does a profitable size exist" test).
+        if let Some(s) = best_size(&legs, scale, cap, U256::ZERO, U256::ZERO) {
+            if let Some(net) = s.result.net_profit {
+                if !net.is_zero() {
+                    found += 1;
+                    let path: Vec<String> = std::iter::once(cyc[0].from)
+                        .chain(cyc.iter().map(|e| e.to))
+                        .map(|a| sym_for(&book, a))
+                        .collect();
+                    println!(
+                        "  ARB +{}.{:06} {base_sym} @ size {}.{:06} | {} | pools={:?}",
+                        net / scale,
+                        net % scale,
+                        s.amount_in / scale,
+                        s.amount_in % scale,
+                        path.join("->"),
+                        cyc.iter().map(|e| e.pool).collect::<Vec<_>>(),
+                    );
+                }
+            }
+        }
+    }
+    if found == 0 {
+        println!("find-arb: no gross-profitable cycle at block {bn} (state at this block is balanced for these pools).");
+    } else {
+        println!("find-arb: {found} profitable cycle(s) at block {bn} — sim-confirmed (consistent snapshot, wei-exact tick math).");
+    }
+}
+
+#[cfg(feature = "live-rpc")]
+fn sym_for(book: &arb::book::PoolBook, a: arb::types::Address) -> String {
+    book.tokens.iter().find(|(_, t)| t.address == a).map(|(s, _)| s.clone()).unwrap_or_else(|| format!("{a:#x}")[..8].to_string())
+}
+
+/// Classify a pool by probing standard getters (no factory registry needed).
+#[cfg(feature = "live-rpc")]
+async fn classify_pool<P: alloy::providers::Provider>(
+    provider: &P,
+    pool: arb::types::Address,
+    block: alloy::eips::BlockId,
+) -> Option<arb::book::PoolInfo> {
+    use alloy::primitives::{Bytes, TxKind};
+    use alloy::rpc::types::{TransactionInput, TransactionRequest};
+    use arb::book::PoolInfo;
+    use arb::types::Address;
+
+    let call = |sel: [u8; 4]| {
+        let tx = TransactionRequest {
+            to: Some(TxKind::Call(pool)),
+            input: TransactionInput::new(Bytes::from(sel.to_vec())),
+            ..Default::default()
+        };
+        async move { provider.call(tx).block(block).await.ok() }
+    };
+    let sel = |s: &str| {
+        let h = alloy::primitives::keccak256(s.as_bytes());
+        [h[0], h[1], h[2], h[3]]
+    };
+    let word_addr = |b: &alloy::primitives::Bytes| -> Option<Address> {
+        let r = b.as_ref();
+        (r.len() >= 32).then(|| Address::from_slice(&r[12..32]))
+    };
+    let t0 = word_addr(&call(sel("token0()")).await?)?;
+    let t1 = word_addr(&call(sel("token1()")).await?)?;
+    // V3? slot0() present.
+    if let Some(s0) = call(sel("slot0()")).await {
+        if s0.as_ref().len() >= 32 {
+            let fee = call(sel("fee()"))
+                .await
+                .and_then(|b| (b.as_ref().len() >= 32).then(|| u32::from_be_bytes([b[28], b[29], b[30], b[31]])));
+            return Some(PoolInfo {
+                address: pool,
+                exchange: "v3".into(),
+                kind: "uniswap_v3".into(),
+                token0: t0,
+                token1: t1,
+                fee_bps: fee,
+                discovered_block: None,
+            });
+        }
+    }
+    // Aerodrome? stable() present.
+    if call(sel("stable()")).await.map(|b| b.as_ref().len() >= 32).unwrap_or(false) {
+        return Some(PoolInfo {
+            address: pool,
+            exchange: "aerodrome".into(),
+            kind: "uniswap_v2".into(),
+            token0: t0,
+            token1: t1,
+            fee_bps: None,
+            discovered_block: None,
+        });
+    }
+    // Plain V2.
+    if call(sel("getReserves()")).await.map(|b| b.as_ref().len() >= 64).unwrap_or(false) {
+        return Some(PoolInfo {
+            address: pool,
+            exchange: "uniswap-v2".into(),
+            kind: "uniswap_v2".into(),
+            token0: t0,
+            token1: t1,
+            fee_bps: Some(30),
+            discovered_block: None,
+        });
+    }
+    None
+}
+
+#[cfg(feature = "live-rpc")]
+async fn fetch_decimals<P: alloy::providers::Provider>(
+    provider: &P,
+    token: arb::types::Address,
+    block: alloy::eips::BlockId,
+) -> Option<u8> {
+    use alloy::primitives::{Bytes, TxKind};
+    use alloy::rpc::types::{TransactionInput, TransactionRequest};
+    let tx = TransactionRequest {
+        to: Some(TxKind::Call(token)),
+        input: TransactionInput::new(Bytes::from(vec![0x31, 0x3c, 0xe5, 0x67])), // decimals()
+        ..Default::default()
+    };
+    let out = provider.call(tx).block(block).await.ok()?;
+    (out.as_ref().len() >= 32).then(|| out.as_ref()[31])
+}
+
 #[cfg(feature = "live-rpc")]
 fn flashblocks_probe_command(n: usize) {
     use arb::live::base::flashblocks::{probe, BaseFlashblocksSource};
@@ -751,6 +1027,12 @@ fn flashblocks_probe_command(n: usize) {
 #[cfg(not(feature = "live-rpc"))]
 fn flashblocks_probe_command(_n: usize) {
     eprintln!("flashblocks-probe requires --features live-rpc");
+    std::process::exit(1);
+}
+
+#[cfg(not(feature = "live-rpc"))]
+fn find_arb_command(_c: arb::config::Chain, _p: Vec<String>, _b: Option<u64>, _h: usize, _a: u64, _base: String) {
+    eprintln!("find-arb requires --features live-rpc");
     std::process::exit(1);
 }
 

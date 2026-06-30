@@ -72,13 +72,38 @@ pub async fn fetch_slot0<P: Provider>(
     block: BlockId,
 ) -> Result<V3Snapshot, SourceError> {
     let c = IUniswapV3Pool::new(pool, provider);
-    let s = c.slot0().block(block).call().await.map_err(rpc)?;
     let liq = c.liquidity().block(block).call().await.map_err(rpc)?;
     let spacing = c.tickSpacing().block(block).call().await.map_err(rpc)?;
+    // slot0()'s tail fields differ across V3 forks (e.g. Aerodrome Slipstream
+    // drops `feeProtocol`), so the typed decode fails on them. The first two
+    // return words — sqrtPriceX96 then tick — are identical across all forks, so
+    // fall back to parsing those raw when the strict decode fails.
+    let (sqrt_price_x96, tick) = match c.slot0().block(block).call().await {
+        Ok(s) => (U256::from(s.sqrtPriceX96), s.tick.as_i32()),
+        Err(_) => {
+            use alloy::primitives::{Bytes, TxKind};
+            use alloy::rpc::types::{TransactionInput, TransactionRequest};
+            let tx = TransactionRequest {
+                to: Some(TxKind::Call(pool)),
+                input: TransactionInput::new(Bytes::from(vec![0x38, 0x50, 0xc7, 0xbd])), // slot0()
+                ..Default::default()
+            };
+            let raw = provider.call(tx).block(block).await.map_err(rpc)?;
+            let b = raw.as_ref();
+            if b.len() < 64 {
+                return Err(SourceError::Rpc("short slot0 return".into()));
+            }
+            let sqrt = U256::from_be_slice(&b[0..32]);
+            // tick: int24 sign-extended to 32 bytes -> low 4 bytes as i32.
+            let mut t = [0u8; 4];
+            t.copy_from_slice(&b[60..64]);
+            (sqrt, i32::from_be_bytes(t))
+        }
+    };
     Ok(V3Snapshot {
-        sqrt_price_x96: U256::from(s.sqrtPriceX96),
+        sqrt_price_x96,
         liquidity: liq,
-        tick: s.tick.as_i32(),
+        tick,
         tick_spacing: spacing.as_i32(),
     })
 }
@@ -202,9 +227,17 @@ async fn read_ticks_in_words<P: Provider>(
             if !res.success {
                 continue;
             }
-            let decoded = IUniswapV3Pool::ticksCall::abi_decode_returns(&res.returnData)
-                .map_err(rpc)?;
-            out.push((t, decoded.liquidityGross, decoded.liquidityNet));
+            // ticks()'s tail fields differ across V3 forks (Slipstream adds
+            // staked-liquidity / reward-growth fields), but liquidityGross (word
+            // 0, uint128) and liquidityNet (word 1, int128) are always first and
+            // at the same offset. Parse them raw so every fork decodes correctly.
+            let rd = res.returnData.as_ref();
+            if rd.len() < 64 {
+                continue;
+            }
+            let gross = u128::from_be_bytes(rd[16..32].try_into().unwrap());
+            let net = i128::from_be_bytes(rd[48..64].try_into().unwrap());
+            out.push((t, gross, net));
         }
     }
     Ok(out)
