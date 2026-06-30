@@ -4,7 +4,10 @@ chain = "base"
 name = "uniswap-v3"
 kind = "uniswap_v3"
 factory = "0x33128a8fc17869897dce68ed026d694621f6fdfd"
-pool_codehashes = ["0xee8f1c7d6c754818974392c624a6b4f5cab0c815195f8c859735dcb7a1259f1b"]
+pool_codehashes = [
+    "0xee8f1c7d6c754818974392c624a6b4f5cab0c815195f8c859735dcb7a1259f1b",
+    "0xbedcea5c5dce1507cc906f5d99041ddc8287aad063c9cfd844d7a6749ec45413",
+]
 
 [[exchange]]
 name = "uniswap-v2"
@@ -27,7 +30,10 @@ factory = "0x5e7bb104d84c7cb9b682aac2f3d509f5f406809a"
 name = "pancakeswap-v3"
 kind = "uniswap_v3"
 factory = "0x0bfbcf9fa4f9c56b0f40a671ad40e0805a091865"
-pool_codehashes = ["0xc85259458226f7f2d9e68ffffb0e483de3821c0689f9f7f1d50757ba63ad99bb"]
+pool_codehashes = [
+    "0xc85259458226f7f2d9e68ffffb0e483de3821c0689f9f7f1d50757ba63ad99bb",
+    "0xdf1f7625d082c3fbec68148feb8bab2b0b71fa9a1f213265ffd60ec6a1c1bc2f",
+]
 
 [[exchange]]
 name = "balancer-v2"
