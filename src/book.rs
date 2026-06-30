@@ -33,6 +33,32 @@ pub struct TokenInfo {
     pub decimals: u8,
 }
 
+/// Per-chain incremental-scan watermark: the last block `scan --active` covered.
+/// Lets indexing run as a "catch up from watermark → head" job (no gaps, no
+/// `--blocks` guessing). Git-tracked alongside the books.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ScanState {
+    #[serde(default)]
+    pub last_active_block: u64,
+}
+
+impl ScanState {
+    /// `config/<chain>.scanstate.toml`.
+    pub fn path_for_chain(chain: &str) -> std::path::PathBuf {
+        Path::new("config").join(format!("{chain}.scanstate.toml"))
+    }
+
+    pub fn load_or_default(chain: &str) -> Self {
+        let path = Self::path_for_chain(chain);
+        std::fs::read_to_string(path).ok().and_then(|s| toml::from_str(&s).ok()).unwrap_or_default()
+    }
+
+    pub fn save(&self, chain: &str) -> Result<(), BookError> {
+        std::fs::write(Self::path_for_chain(chain), toml::to_string_pretty(self)?)?;
+        Ok(())
+    }
+}
+
 /// A pool = one graph edge (token0 <-> token1). The runtime traverses these.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PoolInfo {

@@ -155,6 +155,11 @@ struct ScanArgs {
     /// DEX over the last --blocks blocks into the secondary tier.
     #[arg(long, default_value_t = false)]
     active: bool,
+    /// With --active: scan from the persisted watermark to head (incremental
+    /// catch-up) instead of the last --blocks blocks. Falls back to --blocks if
+    /// no watermark exists yet.
+    #[arg(long, default_value_t = false)]
+    catch_up: bool,
 }
 
 /// Shared chain + exchange + pool selection.
@@ -260,7 +265,7 @@ fn main() {
             if chain != arb::config::Chain::Base {
                 fail("scan is currently Base-only");
             }
-            scan_command(chain, args.blocks, args.window, args.active);
+            scan_command(chain, args.blocks, args.window, args.active, args.catch_up);
         }
         Command::Verify(args) => {
             let chain = arb::config::Chain::parse(&args.chain).unwrap_or_else(|e| fail(&e));
@@ -437,7 +442,7 @@ fn live_command(_sel: &Selection, _pools: Vec<Address>, _secs: u64, _verify: boo
 }
 
 #[cfg(feature = "live-rpc")]
-fn scan_command(chain: arb::config::Chain, blocks: u64, window: u64, active: bool) {
+fn scan_command(chain: arb::config::Chain, blocks: u64, window: u64, active: bool, catch_up: bool) {
     use arb::book::{PoolBook, Sources, Tier};
     use arb::live::base::scan::scan;
 
@@ -453,7 +458,7 @@ fn scan_command(chain: arb::config::Chain, blocks: u64, window: u64, active: boo
         .unwrap_or_else(|e| fail(&format!("load secondary book: {e}")));
 
     if active {
-        scan_active_command(chain, &url, &chain_name, &sources, official, secondary, blocks, window);
+        scan_active_command(chain, &url, &chain_name, &sources, official, secondary, blocks, window, catch_up);
         return;
     }
 
@@ -530,11 +535,14 @@ fn scan_active_command(
     mut secondary: arb::book::PoolBook,
     blocks: u64,
     window: u64,
+    catch_up: bool,
 ) {
-    use arb::book::{PoolBook, TokenInfo, Tier};
+    use arb::book::{PoolBook, ScanState, TokenInfo, Tier};
     use arb::live::base::scan::discover_active_pools;
     use std::collections::HashSet;
     let _ = chain;
+
+    let mut state = ScanState::load_or_default(chain_name);
 
     let known_pools: HashSet<_> =
         official.pools.iter().chain(secondary.pools.iter()).map(|p| p.address).collect();
@@ -554,14 +562,26 @@ fn scan_active_command(
         let provider = arb::live::base::rpc::connect(url).await.map_err(|e| e.to_string())?;
         use alloy::providers::Provider;
         let head = provider.get_block_number().await.map_err(|e| e.to_string())?;
-        let from = head.saturating_sub(blocks);
+        // Incremental catch-up scans from the persisted watermark; otherwise the
+        // last --blocks blocks. The watermark wins only if it's behind head.
+        let from = if catch_up && state.last_active_block > 0 && state.last_active_block < head {
+            state.last_active_block + 1
+        } else {
+            head.saturating_sub(blocks)
+        };
+        if from > head {
+            println!("scan --active: already current (watermark {} >= head {head})", state.last_active_block);
+            return Ok::<_, String>((head, Vec::new(), Vec::new(), std::collections::BTreeMap::new()));
+        }
         println!("scan --active: indexing pools traded in blocks {from}..={head} (confirmable DEXes only)...");
-        discover_active_pools(&provider, sources, &known_pools, &known_tokens, from, head, window)
-            .await
-            .map_err(|e| e.to_string())
+        let (p, t, h) =
+            discover_active_pools(&provider, sources, &known_pools, &known_tokens, from, head, window)
+                .await
+                .map_err(|e| e.to_string())?;
+        Ok((head, p, t, h))
     });
 
-    let (pools, tokens, hist) = match res {
+    let (head, pools, tokens, hist) = match res {
         Ok(v) => v,
         Err(e) => fail(&format!("scan --active error: {e}")),
     };
@@ -597,6 +617,12 @@ fn scan_active_command(
             .save(PoolBook::path_for_chain(chain_name, Tier::Secondary))
             .unwrap_or_else(|e| fail(&format!("save secondary: {e}")));
         println!("secondary book written (commit it to git).");
+    }
+    // Advance the watermark so the next --catch-up resumes from here.
+    if head > state.last_active_block {
+        state.last_active_block = head;
+        state.save(chain_name).unwrap_or_else(|e| fail(&format!("save scan state: {e}")));
+        println!("scan watermark -> block {head}");
     }
 }
 
@@ -1100,7 +1126,7 @@ fn verify_command(_chain: arb::config::Chain, _max_pools: usize) {
 }
 
 #[cfg(not(feature = "live-rpc"))]
-fn scan_command(_chain: arb::config::Chain, _blocks: u64, _window: u64, _active: bool) {
+fn scan_command(_chain: arb::config::Chain, _blocks: u64, _window: u64, _active: bool, _catch_up: bool) {
     eprintln!(
         "scan requires the RPC backend. Rebuild with:\n    cargo run --features live-rpc -- scan --chain base"
     );
