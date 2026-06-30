@@ -595,8 +595,22 @@ fn watch_arb_command(chain: arb::config::Chain, amount: u64, min_profit: u64, ma
     let chain_name = chain.to_string();
     let url = std::env::var(chain.rpc_env_var())
         .unwrap_or_else(|_| fail(&format!("set ${} to your Alchemy Base WS endpoint", chain.rpc_env_var())));
-    let book = PoolBook::load(PoolBook::path_for_chain(&chain_name, Tier::Official))
+    let mut book = PoolBook::load(PoolBook::path_for_chain(&chain_name, Tier::Official))
         .unwrap_or_else(|e| fail(&format!("load official book: {e} (run `arb scan` first)")));
+    let official_pools = book.pools.len();
+    // Fold in the discovered/secondary tier when present (more tokens & less-liquid
+    // pools = more dislocation = more candidate cycles). Official wins conflicts.
+    match PoolBook::load_or_new(&chain_name, Tier::Secondary) {
+        Ok(secondary) if !secondary.pools.is_empty() => {
+            let (tok, pools) = book.merge(&secondary);
+            println!(
+                "loaded {official_pools} official + {pools} secondary pools (+{tok} tokens); {} total",
+                book.pools.len()
+            );
+        }
+        Ok(_) => println!("loaded {official_pools} official pools (secondary tier empty — run `arb scan` to populate)"),
+        Err(e) => eprintln!("warning: secondary book present but failed to load: {e}"),
+    }
     let usdc = book.tokens.get("USDC").unwrap_or_else(|| fail("no USDC in book")).address;
     let weth = book.tokens.get("WETH").map(|t| t.address);
     let dec = book.tokens.get("USDC").map(|t| t.decimals).unwrap_or(6);

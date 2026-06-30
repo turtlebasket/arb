@@ -128,6 +128,27 @@ impl PoolBook {
     pub fn has_pool(&self, address: Address) -> bool {
         self.pools.iter().any(|p| p.address == address)
     }
+
+    /// Fold `other`'s tokens and pools into this book. `self` (the trusted tier)
+    /// wins every conflict: an existing token symbol or pool address is kept, only
+    /// previously-unseen entries are added. Returns `(tokens_added, pools_added)`.
+    pub fn merge(&mut self, other: &PoolBook) -> (usize, usize) {
+        let mut tokens_added = 0;
+        for (sym, tok) in &other.tokens {
+            if !self.tokens.contains_key(sym) {
+                self.tokens.insert(sym.clone(), tok.clone());
+                tokens_added += 1;
+            }
+        }
+        let mut pools_added = 0;
+        for p in &other.pools {
+            if !self.has_pool(p.address) {
+                self.pools.push(p.clone());
+                pools_added += 1;
+            }
+        }
+        (tokens_added, pools_added)
+    }
 }
 
 // ===========================================================================
@@ -258,6 +279,43 @@ mod tests {
             discovered_block: Some(456),
         }));
         assert_eq!(book.pools.len(), 2);
+    }
+
+    #[test]
+    fn merge_dedups_and_official_wins() {
+        let mut official = sample(); // tokens WETH,USDC; pool addr(10)
+        let mut secondary = PoolBook::empty("base");
+        // A NEW token + a NEW pool, plus a colliding token (different decimals) and
+        // a colliding pool address (different exchange) that must NOT overwrite.
+        secondary.tokens.insert("DAI".into(), TokenInfo { address: addr(3), decimals: 18 });
+        secondary.tokens.insert("USDC".into(), TokenInfo { address: addr(2), decimals: 99 });
+        secondary.pools.push(PoolInfo {
+            address: addr(20),
+            exchange: "pancakeswap-v3".into(),
+            kind: "uniswap_v3".into(),
+            token0: addr(1),
+            token1: addr(3),
+            fee_bps: Some(25),
+            discovered_block: None,
+        });
+        secondary.pools.push(PoolInfo {
+            address: addr(10), // collides with official's pool
+            exchange: "SHOULD_NOT_WIN".into(),
+            kind: "uniswap_v2".into(),
+            token0: addr(1),
+            token1: addr(2),
+            fee_bps: Some(1),
+            discovered_block: None,
+        });
+
+        let (toks, pools) = official.merge(&secondary);
+        assert_eq!((toks, pools), (1, 1), "only DAI + pool addr(20) are new");
+        assert_eq!(official.pools.len(), 2);
+        // Official's USDC (6 decimals) and pool addr(10) (aerodrome) are preserved.
+        assert_eq!(official.tokens["USDC"].decimals, 6);
+        assert_eq!(official.pools.iter().find(|p| p.address == addr(10)).unwrap().exchange, "aerodrome");
+        assert!(official.tokens.contains_key("DAI"));
+        assert!(official.has_pool(addr(20)));
     }
 
     #[test]
