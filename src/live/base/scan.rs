@@ -77,6 +77,193 @@ fn addr_from_word(word: &B256) -> Address {
     Address::from_slice(&word.as_slice()[12..32])
 }
 
+/// `eth_call` returning the first 32-byte word (or None on empty/revert).
+async fn call_word<P: Provider>(provider: &P, to: Address, selector: [u8; 4]) -> Option<[u8; 32]> {
+    let tx = TransactionRequest {
+        to: Some(TxKind::Call(to)),
+        input: TransactionInput::new(Bytes::from(selector.to_vec())),
+        ..Default::default()
+    };
+    let out = provider.call(tx).await.ok()?;
+    let raw = out.as_ref();
+    if raw.len() < 32 {
+        return None;
+    }
+    let mut w = [0u8; 32];
+    w.copy_from_slice(&raw[..32]);
+    Some(w)
+}
+
+/// `eth_call` returning raw return bytes (or None on revert).
+async fn call_bytes<P: Provider>(provider: &P, to: Address, selector: [u8; 4]) -> Option<Vec<u8>> {
+    let tx = TransactionRequest {
+        to: Some(TxKind::Call(to)),
+        input: TransactionInput::new(Bytes::from(selector.to_vec())),
+        ..Default::default()
+    };
+    provider.call(tx).await.ok().map(|b| b.as_ref().to_vec())
+}
+
+/// `decimals()` -> u8 (last byte of the returned word).
+async fn call_decimals<P: Provider>(provider: &P, token: Address) -> Option<u8> {
+    call_word(provider, token, selector("decimals()")).await.map(|w| w[31])
+}
+
+/// `symbol()` -> String. Handles both ABI `string` (offset/len/data) and legacy
+/// `bytes32` symbols; falls back to the short address on garbage.
+async fn call_symbol<P: Provider>(provider: &P, token: Address) -> String {
+    let fallback = || format!("{:#x}", token)[..10].to_string();
+    let Some(raw) = call_bytes(provider, token, selector("symbol()")).await else {
+        return fallback();
+    };
+    let clean = |b: &[u8]| {
+        let s: String = b.iter().filter(|c| c.is_ascii_graphic()).map(|c| *c as char).collect();
+        s
+    };
+    if raw.len() == 32 {
+        // legacy bytes32
+        let s = clean(&raw);
+        return if s.is_empty() { fallback() } else { s };
+    }
+    if raw.len() >= 64 {
+        let len = u32::from_be_bytes([raw[60], raw[61], raw[62], raw[63]]) as usize;
+        if len > 0 && 64 + len <= raw.len() {
+            let s = clean(&raw[64..64 + len]);
+            if !s.is_empty() {
+                return s;
+            }
+        }
+    }
+    fallback()
+}
+
+/// The three AMM `Swap` event signatures we treat as "this address is a pool".
+fn swap_topics() -> Vec<B256> {
+    vec![
+        topic("Swap(address,uint256,uint256,uint256,uint256,address)"), // UniV2
+        topic("Swap(address,address,int256,int256,uint160,uint128,int24)"), // UniV3 / Slipstream
+        topic("Swap(address,address,uint256,uint256,uint256,uint256)"), // Aerodrome
+    ]
+}
+
+/// Discover pools by **recent swap activity** — the pools that actually trade are
+/// where arbs live (factory enumeration / fixed pair-lookup misses long-tail
+/// pools and fee tiers). For every address that emitted a `Swap` in `[from, to]`
+/// and isn't already `known`, classify it by its on-chain `factory()` against the
+/// configured exchanges, resolve `token0`/`token1` (+ V3 `fee()` / Aerodrome
+/// `stable()`), and return a [`PoolInfo`] for every pool on a **confirmable** DEX
+/// (one with a ground-truth quoter: uniswap-v3, pancakeswap-v3, aerodrome,
+/// uniswap-v2). Pools on DEXes we can't yet confirm wei-exact
+/// (aerodrome-slipstream, balancer-v2) or from unknown factories are tallied but
+/// **skipped** — indexing a pool we can't verify would break the wei-exact rule.
+///
+/// Returns the new pools plus a per-bucket histogram (exchange name, or
+/// `skip:<reason>`), so coverage gaps (e.g. how much volume is on slipstream) are
+/// visible rather than silently dropped.
+#[allow(clippy::type_complexity)]
+pub async fn discover_active_pools<P: Provider>(
+    provider: &P,
+    sources: &Sources,
+    known: &HashSet<Address>,
+    known_tokens: &HashSet<Address>,
+    from: u64,
+    to: u64,
+    window: u64,
+) -> Result<(Vec<PoolInfo>, Vec<(Address, String, u8)>, std::collections::BTreeMap<String, usize>), SourceError>
+{
+    use std::collections::BTreeMap;
+
+    let filter = Filter::new().event_signature(swap_topics());
+    let logs = logs_chunked(provider, &filter, from, to, window).await?;
+
+    // Unique pool addresses that traded, minus ones we already track.
+    let mut pools: Vec<Address> = logs.iter().map(|l| l.address()).collect();
+    pools.sort();
+    pools.dedup();
+    pools.retain(|p| !known.contains(p));
+
+    // factory address -> exchange.
+    let by_factory: HashMap<Address, &crate::book::ExchangeInfo> =
+        sources.exchanges.iter().filter_map(|e| e.factory.map(|f| (f, e))).collect();
+
+    let fee_sel = selector("fee()");
+    let stable_sel = selector("stable()");
+    let t0_sel = selector("token0()");
+    let t1_sel = selector("token1()");
+    let factory_sel = selector("factory()");
+
+    let mut out = Vec::new();
+    let mut hist: BTreeMap<String, usize> = BTreeMap::new();
+    for pool in pools {
+        let Some(factory) = call_addr(provider, pool, factory_sel.to_vec()).await else {
+            *hist.entry("skip:no_factory()".into()).or_default() += 1;
+            continue;
+        };
+        let Some(exch) = by_factory.get(&factory) else {
+            *hist.entry("skip:unknown_factory".into()).or_default() += 1;
+            continue;
+        };
+        // Only index pools we can confirm wei-exact on-chain.
+        let (kind, fee_bps) = match exch.name.as_str() {
+            "uniswap-v3" | "pancakeswap-v3" => {
+                let fee = call_word(provider, pool, fee_sel)
+                    .await
+                    .map(|w| u32::from_be_bytes([w[28], w[29], w[30], w[31]]));
+                ("uniswap_v3".to_string(), fee) // V3: fee stored in pips
+            }
+            "aerodrome" => {
+                // stable() true -> solidly stable math; false -> volatile (V2). Fee
+                // is read from the factory at runtime, so leave it None here.
+                let stable = call_word(provider, pool, stable_sel).await.map(|w| w[31] != 0);
+                match stable {
+                    Some(true) => ("solidly".to_string(), None),
+                    Some(false) => ("uniswap_v2".to_string(), None),
+                    None => {
+                        *hist.entry("skip:aero_no_stable()".into()).or_default() += 1;
+                        continue;
+                    }
+                }
+            }
+            "uniswap-v2" => ("uniswap_v2".to_string(), Some(30)),
+            other => {
+                *hist.entry(format!("skip:{other}")).or_default() += 1;
+                continue;
+            }
+        };
+        let (Some(t0), Some(t1)) = (
+            call_addr(provider, pool, t0_sel.to_vec()).await,
+            call_addr(provider, pool, t1_sel.to_vec()).await,
+        ) else {
+            *hist.entry("skip:no_tokens".into()).or_default() += 1;
+            continue;
+        };
+        out.push(PoolInfo {
+            address: pool,
+            exchange: exch.name.clone(),
+            kind,
+            token0: t0,
+            token1: t1,
+            fee_bps,
+            discovered_block: None,
+        });
+        *hist.entry(exch.name.clone()).or_default() += 1;
+    }
+
+    // Resolve metadata for any NEW tokens these pools reference (decimals are
+    // required for wei-exact solidly-stable math; symbol keys the book).
+    let mut new_tok_addrs: Vec<Address> =
+        out.iter().flat_map(|p| [p.token0, p.token1]).filter(|a| !known_tokens.contains(a)).collect();
+    new_tok_addrs.sort();
+    new_tok_addrs.dedup();
+    let mut tokens = Vec::new();
+    for a in new_tok_addrs {
+        if let Some(d) = call_decimals(provider, a).await {
+            tokens.push((a, call_symbol(provider, a).await, d));
+        }
+    }
+    Ok((out, tokens, hist))
+}
+
 #[derive(Debug, Default)]
 pub struct ScanReport {
     pub from_block: u64,

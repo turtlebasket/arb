@@ -124,6 +124,11 @@ struct ScanArgs {
     /// Max blocks per eth_getLogs request (Alchemy free tier = 10).
     #[arg(long, default_value_t = 10)]
     window: u64,
+    /// Discover pools by recent SWAP ACTIVITY (where arbs live) instead of
+    /// factory pair-lookup: index every actively-traded pool on a confirmable
+    /// DEX over the last --blocks blocks into the secondary tier.
+    #[arg(long, default_value_t = false)]
+    active: bool,
 }
 
 /// Shared chain + exchange + pool selection.
@@ -229,7 +234,7 @@ fn main() {
             if chain != arb::config::Chain::Base {
                 fail("scan is currently Base-only");
             }
-            scan_command(chain, args.blocks, args.window);
+            scan_command(chain, args.blocks, args.window, args.active);
         }
         Command::Verify(args) => {
             let chain = arb::config::Chain::parse(&args.chain).unwrap_or_else(|e| fail(&e));
@@ -399,7 +404,7 @@ fn live_command(_sel: &Selection, _pools: Vec<Address>, _secs: u64, _verify: boo
 }
 
 #[cfg(feature = "live-rpc")]
-fn scan_command(chain: arb::config::Chain, blocks: u64, window: u64) {
+fn scan_command(chain: arb::config::Chain, blocks: u64, window: u64, active: bool) {
     use arb::book::{PoolBook, Sources, Tier};
     use arb::live::base::scan::scan;
 
@@ -413,6 +418,11 @@ fn scan_command(chain: arb::config::Chain, blocks: u64, window: u64) {
         .unwrap_or_else(|e| fail(&format!("load official book: {e}")));
     let mut secondary = PoolBook::load_or_new(&chain_name, Tier::Secondary)
         .unwrap_or_else(|e| fail(&format!("load secondary book: {e}")));
+
+    if active {
+        scan_active_command(chain, &url, &chain_name, &sources, official, secondary, blocks, window);
+        return;
+    }
 
     let codehashes_before: usize = sources.exchanges.iter().map(|e| e.pool_codehashes.len()).sum();
     let do_forks = blocks > 0;
@@ -471,6 +481,89 @@ fn scan_command(chain: arb::config::Chain, blocks: u64, window: u64) {
             println!("books written (commit them to git).");
         }
         Err(e) => fail(&format!("scan error: {e}")),
+    }
+}
+
+/// `arb scan --active`: discover actively-traded pools (by Swap activity) on
+/// confirmable DEXes and index them into the secondary tier (with token metadata).
+#[cfg(feature = "live-rpc")]
+#[allow(clippy::too_many_arguments)]
+fn scan_active_command(
+    chain: arb::config::Chain,
+    url: &str,
+    chain_name: &str,
+    sources: &arb::book::Sources,
+    official: arb::book::PoolBook,
+    mut secondary: arb::book::PoolBook,
+    blocks: u64,
+    window: u64,
+) {
+    use arb::book::{PoolBook, TokenInfo, Tier};
+    use arb::live::base::scan::discover_active_pools;
+    use std::collections::HashSet;
+    let _ = chain;
+
+    let known_pools: HashSet<_> =
+        official.pools.iter().chain(secondary.pools.iter()).map(|p| p.address).collect();
+    let known_tokens: HashSet<_> = official
+        .tokens
+        .values()
+        .chain(secondary.tokens.values())
+        .map(|t| t.address)
+        .collect();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|e| fail(&format!("tokio runtime: {e}")));
+
+    let res = rt.block_on(async {
+        let provider = arb::live::base::rpc::connect(url).await.map_err(|e| e.to_string())?;
+        use alloy::providers::Provider;
+        let head = provider.get_block_number().await.map_err(|e| e.to_string())?;
+        let from = head.saturating_sub(blocks);
+        println!("scan --active: indexing pools traded in blocks {from}..={head} (confirmable DEXes only)...");
+        discover_active_pools(&provider, sources, &known_pools, &known_tokens, from, head, window)
+            .await
+            .map_err(|e| e.to_string())
+    });
+
+    let (pools, tokens, hist) = match res {
+        Ok(v) => v,
+        Err(e) => fail(&format!("scan --active error: {e}")),
+    };
+
+    // Add new tokens (uniquify symbol on collision so nothing is lost).
+    let mut sym_taken: HashSet<String> = official
+        .tokens
+        .keys()
+        .chain(secondary.tokens.keys())
+        .cloned()
+        .collect();
+    for (addr, sym, dec) in &tokens {
+        let mut key = sym.clone();
+        if sym_taken.contains(&key) {
+            key = format!("{sym}#{}", &format!("{addr:#x}")[2..6]);
+        }
+        sym_taken.insert(key.clone());
+        secondary.tokens.insert(key, TokenInfo { address: *addr, decimals: *dec });
+    }
+    let mut added = 0;
+    for p in pools {
+        if secondary.upsert_pool(p) {
+            added += 1;
+        }
+    }
+
+    println!("scan --active: +{added} pools, +{} tokens. per-bucket:", tokens.len());
+    for (k, n) in &hist {
+        println!("  {k}: {n}");
+    }
+    if added > 0 || !tokens.is_empty() {
+        secondary
+            .save(PoolBook::path_for_chain(chain_name, Tier::Secondary))
+            .unwrap_or_else(|e| fail(&format!("save secondary: {e}")));
+        println!("secondary book written (commit it to git).");
     }
 }
 
@@ -717,7 +810,7 @@ fn verify_command(_chain: arb::config::Chain, _max_pools: usize) {
 }
 
 #[cfg(not(feature = "live-rpc"))]
-fn scan_command(_chain: arb::config::Chain, _blocks: u64, _window: u64) {
+fn scan_command(_chain: arb::config::Chain, _blocks: u64, _window: u64, _active: bool) {
     eprintln!(
         "scan requires the RPC backend. Rebuild with:\n    cargo run --features live-rpc -- scan --chain base"
     );
